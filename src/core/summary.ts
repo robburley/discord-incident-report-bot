@@ -9,7 +9,7 @@ export interface FormatSessionSummaryInput {
 
 export function formatSessionSummary(input: FormatSessionSummaryInput): string {
   const lines = [
-    `Incident session closed for channel ${input.session.channelId}.`
+    `Incident session closed for <#${input.session.channelId}>.`
   ];
 
   if (input.reports.length === 0) {
@@ -33,7 +33,7 @@ export function formatSessionSummary(input: FormatSessionSummaryInput): string {
     }
 
     lines.push(
-      `Turn ${report.turnNumber}: car ${report.carNumber} reported by ${report.submittedByUserId}`
+      `Turn ${report.turnNumber}: car ${report.carNumber} reported by <@${report.submittedByUserId}>`
     );
   }
 

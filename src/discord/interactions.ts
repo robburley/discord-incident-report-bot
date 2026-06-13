@@ -91,7 +91,7 @@ export async function handleDiscordInteraction(
   interaction: unknown,
   dependencies: InteractionHandlerDependencies = {}
 ): Promise<InteractionHandlerResult> {
-  console.log({ event: "handle_interaction_start", interaction: interaction });
+  logInteractionEvent("handle_interaction_start", interaction);
   if (!isInteractionPayload(interaction)) {
     return {
       status: 400,
@@ -124,7 +124,7 @@ async function handleApplicationCommand(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  console.log({ event: "handle_application_command_start", interaction });
+  logInteractionEvent("handle_application_command_start", interaction);
   const context = getGuildCommandContext(interaction);
 
   if (context.status === "invalid") {
@@ -356,7 +356,7 @@ async function handleModalSubmit(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  console.log({ event: "handle_modal_submit_start", interaction });
+  logInteractionEvent("handle_modal_submit_start", interaction);
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -395,6 +395,23 @@ async function handleModalSubmit(
   });
 
   if (result.status === "created") {
+    try {
+      await dependencies.restClient?.createChannelMessage({
+        channelId: context.channelId,
+        content: `An incident report has been submitted by <@${context.userId}>.
+Details:
+Race Number: ${values.get(RACE_NUMBER_INPUT_ID)}
+Lap Number: ${values.get(LAP_NUMBER_INPUT_ID)}
+Turn / Corner Number: ${values.get(TURN_NUMBER_INPUT_ID)}
+Car Number: ${values.get(CAR_NUMBER_INPUT_ID)}`,
+      });
+    } catch (error) {
+      console.error({
+        event: "discord_rest_channel_message_failed",
+        channelId: context.channelId,
+        error: error instanceof Error ? error.message : "Unknown Discord REST error"
+      });
+    }
     return ok(ephemeralDiscordMessage("Incident report submitted."));
   }
 
@@ -661,4 +678,26 @@ function isModalData(data: DiscordInteractionPayload["data"]): data is DiscordMo
     typeof data === "object" &&
     "custom_id" in data
   );
+}
+
+function logInteractionEvent(event: string, interaction: unknown): void {
+  if (!isInteractionPayload(interaction)) {
+    console.log({ event, interactionType: typeof interaction });
+    return;
+  }
+
+  console.log({
+    event,
+    interactionId:
+      typeof interaction.id === "string" ? interaction.id : undefined,
+    interactionType: interaction.type,
+    commandName: isApplicationCommandData(interaction.data)
+      ? interaction.data.name
+      : undefined,
+    modalCustomId: isModalData(interaction.data)
+      ? interaction.data.custom_id
+      : undefined,
+    guildId: interaction.guild_id,
+    channelId: interaction.channel_id
+  });
 }

@@ -160,7 +160,7 @@ describe("Discord interaction handlers", () => {
       {
         channelId: "channel-1",
         content:
-          "Incident session closed for channel channel-1.\n\nRace 1\nLap 2\nTurn 3: car 07 reported by user-1"
+          "Incident session closed for <#channel-1>.\n\nRace 1\nLap 2\nTurn 3: car 07 reported by <@user-1>"
       }
     ]);
     expect(restClient.edits).toEqual([
