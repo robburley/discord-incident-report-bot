@@ -91,6 +91,7 @@ export async function handleDiscordInteraction(
   interaction: unknown,
   dependencies: InteractionHandlerDependencies = {}
 ): Promise<InteractionHandlerResult> {
+  console.log({ event: "handle_interaction_start", interaction: interaction });
   if (!isInteractionPayload(interaction)) {
     return {
       status: 400,
@@ -123,6 +124,7 @@ async function handleApplicationCommand(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
+  console.log({ event: "handle_application_command_start", interaction });
   const context = getGuildCommandContext(interaction);
 
   if (context.status === "invalid") {
@@ -159,6 +161,7 @@ async function handleConfigCommand(
   context: GuildCommandContext,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
+  console.log({ event: "handle_config_command_start", context });
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -203,6 +206,7 @@ async function handleSessionCommand(
   context: GuildCommandContext,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
+  console.log({ event: "handle_session_command_start", context });
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -324,6 +328,7 @@ async function handleIncidentCommand(
   context: GuildCommandContext,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
+  console.log({ event: "handle_incident_command_start", context });
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -351,6 +356,7 @@ async function handleModalSubmit(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
+  console.log({ event: "handle_modal_submit_start", interaction });
   const repository = getRepository(dependencies);
 
   if (!repository) {

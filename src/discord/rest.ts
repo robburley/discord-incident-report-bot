@@ -12,27 +12,28 @@ export interface DiscordRestClient {
 
 export class FetchDiscordRestClient implements DiscordRestClient {
   constructor(
-    private readonly botToken: string,
-    private readonly fetchFn: typeof fetch = fetch
+    private readonly botToken: string
   ) {}
 
   async createChannelMessage(input: {
     readonly channelId: string;
     readonly content: string;
   }): Promise<void> {
-    const response = await this.fetchFn(
-      `https://discord.com/api/v10/channels/${input.channelId}/messages`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bot ${this.botToken}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          content: input.content
-        })
-      }
-    );
+    console.log({ event: "rest_client_create_message", input });
+    const response = await fetch(
+        new URL(`https://discord.com/api/v10/channels/${input.channelId}/messages`),
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bot ${this.botToken}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            content: input.content
+          })
+        }
+      );
+
 
     if (!response.ok) {
       throw new Error(
@@ -46,18 +47,20 @@ export class FetchDiscordRestClient implements DiscordRestClient {
     readonly interactionToken: string;
     readonly content: string;
   }): Promise<void> {
-    const response = await this.fetchFn(
-      `https://discord.com/api/v10/webhooks/${input.applicationId}/${input.interactionToken}/messages/@original`,
-      {
-        method: "PATCH",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          content: input.content
-        })
-      }
-    );
+    console.log({ event: "rest_client_edit_interaction_response", input });
+    const response = await fetch(
+        new URL(`https://discord.com/api/v10/webhooks/${input.applicationId}/${input.interactionToken}/messages/@original`),
+        {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            content: input.content
+          })
+        }
+      );
+
 
     if (!response.ok) {
       throw new Error(

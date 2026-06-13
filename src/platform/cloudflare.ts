@@ -37,6 +37,7 @@ export default {
     }
 
     const rawBody = await request.text();
+    console.log({ event: "interaction_received", body: rawBody });
     const isValidSignature = await verifyDiscordRequestSignature({
       rawBody,
       signature: request.headers.get(DISCORD_SIGNATURE_HEADER),
