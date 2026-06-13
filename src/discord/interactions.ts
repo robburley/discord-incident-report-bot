@@ -1,6 +1,10 @@
 import { PermissionFlagsBits } from "discord-api-types/v10";
 
-import { configureGuildManagerRole } from "../core/config";
+import {
+  INCIDENT_SETUP_MESSAGE,
+  configureGuildManagerRole,
+  getGuildConfigStatus
+} from "../core/config";
 import { createIncidentReport } from "../core/incidents";
 import {
   endIncidentSession,
@@ -178,6 +182,15 @@ async function handleConfigCommand(
 
   const subcommand = getSubcommand(interaction.data);
 
+  if (subcommand?.name === "status") {
+    const result = await getGuildConfigStatus({
+      repository,
+      guildId: context.guildId
+    });
+
+    return ok(ephemeralDiscordMessage(result.message));
+  }
+
   if (subcommand?.name !== "role") {
     return ok(ephemeralDiscordMessage("Unsupported incident config command."));
   }
@@ -333,6 +346,12 @@ async function handleIncidentCommand(
 
   if (!repository) {
     return ok(ephemeralDiscordMessage("Incident storage is not configured."));
+  }
+
+  const config = await repository.getGuildConfig(context.guildId);
+
+  if (!config) {
+    return ok(ephemeralDiscordMessage(INCIDENT_SETUP_MESSAGE));
   }
 
   const activeSession = await repository.getActiveSession(context.guildId);

@@ -55,6 +55,11 @@ export const incidentCommands = [
             required: true
           }
         ]
+      },
+      {
+        name: "status",
+        description: "Show this server's incident bot configuration status.",
+        type: ApplicationCommandOptionType.Subcommand
       }
     ]
   }

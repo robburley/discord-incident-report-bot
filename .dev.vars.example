@@ -1,4 +1,5 @@
 DISCORD_PUBLIC_KEY=replace-with-discord-application-public-key
 DISCORD_APPLICATION_ID=replace-with-discord-application-id
 DISCORD_BOT_TOKEN=replace-with-discord-bot-token
+# Development-only: required for npm run register:commands:guild, not production global registration.
 DISCORD_TEST_GUILD_ID=replace-with-test-guild-id

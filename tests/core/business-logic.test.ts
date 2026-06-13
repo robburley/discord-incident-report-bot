@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { hasManagerRole } from "../../src/core/authorization";
-import { configureGuildManagerRole } from "../../src/core/config";
+import {
+  configureGuildManagerRole,
+  getGuildConfigStatus
+} from "../../src/core/config";
 import {
   createIncidentReport,
   validateIncidentReportFields
@@ -49,6 +52,51 @@ describe("core business logic", () => {
     });
   });
 
+  it("reports guild configuration status", async () => {
+    const unconfigured = await getGuildConfigStatus({
+      repository,
+      guildId: "guild-1"
+    });
+    await seedConfig(repository);
+    const configured = await getGuildConfigStatus({
+      repository,
+      guildId: "guild-1"
+    });
+
+    expect(unconfigured).toMatchObject({
+      status: "not_configured",
+      message:
+        "No incident manager role is configured. This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+    });
+    expect(configured).toMatchObject({
+      status: "configured",
+      message: "Incident bot is configured. Manager role: <@&manager-role>.",
+      config: {
+        managerRoleId: "manager-role"
+      }
+    });
+  });
+
+  it("keeps manager role configuration independent across two guilds", async () => {
+    await configureGuildManagerRole({
+      repository,
+      guildId: "guild-a",
+      managerRoleId: "manager-role-a"
+    });
+    await configureGuildManagerRole({
+      repository,
+      guildId: "guild-b",
+      managerRoleId: "manager-role-b"
+    });
+
+    await expect(repository.getGuildConfig("guild-a")).resolves.toMatchObject({
+      managerRoleId: "manager-role-a"
+    });
+    await expect(repository.getGuildConfig("guild-b")).resolves.toMatchObject({
+      managerRoleId: "manager-role-b"
+    });
+  });
+
   it("authorizes members by configured manager role", () => {
     expect(
       hasManagerRole({
@@ -85,6 +133,45 @@ describe("core business logic", () => {
 
     expect(started.status).toBe("started");
     expect(duplicate.status).toBe("active_session_exists");
+  });
+
+  it("scopes active session checks by guild", async () => {
+    await seedConfig(repository, "guild-a", "manager-role-a");
+    await seedConfig(repository, "guild-b", "manager-role-b");
+
+    const first = await startIncidentSession({
+      repository,
+      guildId: "guild-a",
+      channelId: "shared-channel",
+      userId: "same-user",
+      memberRoleIds: ["manager-role-a"]
+    });
+    const second = await startIncidentSession({
+      repository,
+      guildId: "guild-b",
+      channelId: "shared-channel",
+      userId: "same-user",
+      memberRoleIds: ["manager-role-b"]
+    });
+    const duplicate = await startIncidentSession({
+      repository,
+      guildId: "guild-a",
+      channelId: "other-channel",
+      userId: "same-user",
+      memberRoleIds: ["manager-role-a"]
+    });
+
+    expect(first.status).toBe("started");
+    expect(second.status).toBe("started");
+    expect(duplicate.status).toBe("active_session_exists");
+    await expect(repository.getActiveSession("guild-a")).resolves.toMatchObject({
+      guildId: "guild-a",
+      channelId: "shared-channel"
+    });
+    await expect(repository.getActiveSession("guild-b")).resolves.toMatchObject({
+      guildId: "guild-b",
+      channelId: "shared-channel"
+    });
   });
 
   it("does not start or end sessions without the manager role", async () => {
@@ -332,21 +419,184 @@ describe("core business logic", () => {
       "`1     1    1     07   interaction-1` <@user-1>"
     );
   });
+
+  it("rebuilds summaries from only the invoking guild's latest closed session", async () => {
+    await seedConfig(repository, "guild-a", "manager-role-a");
+    await seedConfig(repository, "guild-b", "manager-role-b");
+    const guildAOld = await seedActiveSession(repository, "channel-a-old", "guild-a");
+    await repository.insertReport(
+      reportInput(guildAOld, "guild-a-old-report", 1, 1, 1, "11")
+    );
+    await repository.closeSession({
+      sessionId: guildAOld.id,
+      endedByUserId: "manager-a"
+    });
+    const guildBSession = await seedActiveSession(repository, "channel-b", "guild-b");
+    await repository.insertReport(
+      reportInput(guildBSession, "guild-b-report", 2, 1, 1, "22")
+    );
+    await repository.closeSession({
+      sessionId: guildBSession.id,
+      endedByUserId: "manager-b"
+    });
+    const guildANew = await seedActiveSession(repository, "channel-a-new", "guild-a");
+    await repository.insertReport(
+      reportInput(guildANew, "guild-a-new-report", 3, 1, 1, "33")
+    );
+    await repository.closeSession({
+      sessionId: guildANew.id,
+      endedByUserId: "manager-a"
+    });
+
+    const guildAResult = await getLatestClosedSessionSummary({
+      repository,
+      guildId: "guild-a",
+      userId: "manager-a",
+      memberRoleIds: ["manager-role-a"]
+    });
+    const guildBResult = await getLatestClosedSessionSummary({
+      repository,
+      guildId: "guild-b",
+      userId: "manager-b",
+      memberRoleIds: ["manager-role-b"]
+    });
+
+    expect(guildAResult.status).toBe("found");
+    expect(guildAResult.status === "found" ? guildAResult.session.id : "").toBe(
+      guildANew.id
+    );
+    expect(
+      guildAResult.status === "found" ? guildAResult.summaryMessages[0] : ""
+    ).toContain("guild-a-new-report");
+    expect(
+      guildAResult.status === "found" ? guildAResult.summaryMessages[0] : ""
+    ).not.toContain("guild-b-report");
+    expect(guildBResult.status).toBe("found");
+    expect(guildBResult.status === "found" ? guildBResult.session.id : "").toBe(
+      guildBSession.id
+    );
+    expect(
+      guildBResult.status === "found" ? guildBResult.summaryMessages[0] : ""
+    ).toContain("guild-b-report");
+    expect(
+      guildBResult.status === "found" ? guildBResult.summaryMessages[0] : ""
+    ).not.toContain("guild-a-new-report");
+  });
+
+  it("keeps reports from one guild out of another guild's summary", async () => {
+    await seedConfig(repository, "guild-a", "manager-role");
+    await seedConfig(repository, "guild-b", "manager-role");
+    const guildASession = await seedActiveSession(
+      repository,
+      "shared-channel",
+      "guild-a"
+    );
+    const guildBSession = await seedActiveSession(
+      repository,
+      "shared-channel",
+      "guild-b"
+    );
+
+    await createIncidentReport({
+      repository,
+      guildId: "guild-a",
+      channelId: "shared-channel",
+      submittedByUserId: "same-user",
+      discordInteractionId: "guild-a-interaction",
+      raceNumber: "1",
+      lapNumber: "1",
+      turnNumber: "1",
+      carNumber: "07"
+    });
+    await createIncidentReport({
+      repository,
+      guildId: "guild-b",
+      channelId: "shared-channel",
+      submittedByUserId: "same-user",
+      discordInteractionId: "guild-b-interaction",
+      raceNumber: "2",
+      lapNumber: "1",
+      turnNumber: "1",
+      carNumber: "99"
+    });
+    await repository.closeSession({
+      sessionId: guildASession.id,
+      endedByUserId: "manager-a"
+    });
+    await repository.closeSession({
+      sessionId: guildBSession.id,
+      endedByUserId: "manager-b"
+    });
+
+    const guildAResult = await getLatestClosedSessionSummary({
+      repository,
+      guildId: "guild-a",
+      userId: "manager-a",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(guildAResult.status).toBe("found");
+    expect(
+      guildAResult.status === "found" ? guildAResult.summaryMessages[0] : ""
+    ).toContain("guild-a-interaction");
+    expect(
+      guildAResult.status === "found" ? guildAResult.summaryMessages[0] : ""
+    ).not.toContain("guild-b-interaction");
+  });
+
+  it("leaves an unconfigured guild blocked while another guild is configured", async () => {
+    await seedConfig(repository, "guild-a", "manager-role");
+
+    const configured = await startIncidentSession({
+      repository,
+      guildId: "guild-a",
+      channelId: "channel-a",
+      userId: "manager-a",
+      memberRoleIds: ["manager-role"]
+    });
+    const unconfiguredStart = await startIncidentSession({
+      repository,
+      guildId: "guild-b",
+      channelId: "channel-b",
+      userId: "manager-b",
+      memberRoleIds: ["manager-role"]
+    });
+    const unconfiguredReport = await createIncidentReport({
+      repository,
+      guildId: "guild-b",
+      channelId: "channel-b",
+      submittedByUserId: "same-user",
+      discordInteractionId: "guild-b-interaction",
+      raceNumber: "1",
+      lapNumber: "1",
+      turnNumber: "1",
+      carNumber: "07"
+    });
+
+    expect(configured.status).toBe("started");
+    expect(unconfiguredStart.status).toBe("guild_not_configured");
+    expect(unconfiguredReport.status).toBe("guild_not_configured");
+  });
 });
 
-async function seedConfig(repository: MemoryIncidentRepository): Promise<void> {
+async function seedConfig(
+  repository: MemoryIncidentRepository,
+  guildId = "guild-1",
+  managerRoleId = "manager-role"
+): Promise<void> {
   await repository.upsertGuildConfig({
-    guildId: "guild-1",
-    managerRoleId: "manager-role"
+    guildId,
+    managerRoleId
   });
 }
 
 async function seedActiveSession(
   repository: MemoryIncidentRepository,
-  channelId = "channel-1"
+  channelId = "channel-1",
+  guildId = "guild-1"
 ): Promise<IncidentSession> {
   return repository.createSession({
-    guildId: "guild-1",
+    guildId,
     channelId,
     startedByUserId: "manager-1"
   });

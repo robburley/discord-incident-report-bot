@@ -4,6 +4,7 @@ import type {
   IncidentSession
 } from "../db/repository";
 import { hasManagerRole } from "./authorization";
+import { INCIDENT_SETUP_MESSAGE } from "./config";
 import { formatSplitSessionSummary } from "./summary";
 
 interface SessionActionInput {
@@ -188,7 +189,7 @@ async function authorizeSessionAction(
   if (!config) {
     return {
       status: "guild_not_configured",
-      message: "Configure an incident manager role before using incidents."
+      message: INCIDENT_SETUP_MESSAGE
     };
   }
 

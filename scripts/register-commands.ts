@@ -1,14 +1,17 @@
 import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { Routes } from "discord-api-types/v10";
 
 import { incidentCommands } from "../src/discord/commands.ts";
 
 declare const process: {
   readonly env: RegisterCommandsEnv & Record<string, string | undefined>;
+  readonly argv: readonly string[];
   exitCode?: number;
 };
 
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
+const REGISTRATION_SCOPES = ["guild", "global"] as const;
 
 interface RegisterCommandsEnv {
   readonly DISCORD_APPLICATION_ID?: string;
@@ -16,13 +19,21 @@ interface RegisterCommandsEnv {
   readonly DISCORD_TEST_GUILD_ID?: string;
 }
 
+type RegistrationScope = (typeof REGISTRATION_SCOPES)[number];
+
 type MutableRegisterCommandsEnv = {
   DISCORD_APPLICATION_ID?: string;
   DISCORD_BOT_TOKEN?: string;
   DISCORD_TEST_GUILD_ID?: string;
 };
 
-function loadDevVars(path = ".dev.vars"): RegisterCommandsEnv {
+interface RegisterCommandsOptions {
+  readonly env: RegisterCommandsEnv;
+  readonly scope: RegistrationScope;
+  readonly fetchImpl?: typeof fetch;
+}
+
+export function loadDevVars(path = ".dev.vars"): RegisterCommandsEnv {
   if (!existsSync(path)) {
     return {};
   }
@@ -66,12 +77,56 @@ function loadDevVars(path = ".dev.vars"): RegisterCommandsEnv {
   return env;
 }
 
-function getRequiredEnv(env: RegisterCommandsEnv): Required<RegisterCommandsEnv> {
-  const missing = [
+export function parseRegistrationScope(args: readonly string[]): RegistrationScope | "help" {
+  if (args.includes("--help") || args.includes("-h")) {
+    return "help";
+  }
+
+  const scopeFlagIndex = args.indexOf("--scope");
+  const rawScope =
+    scopeFlagIndex >= 0
+      ? args[scopeFlagIndex + 1]
+      : args
+          .find((arg) => arg.startsWith("--scope="))
+          ?.slice("--scope=".length);
+
+  if (!rawScope) {
+    throw new Error("Missing command registration scope. Use --scope guild or --scope global.");
+  }
+
+  if (!REGISTRATION_SCOPES.includes(rawScope as RegistrationScope)) {
+    throw new Error(`Unsupported command registration scope: ${rawScope}`);
+  }
+
+  return rawScope as RegistrationScope;
+}
+
+export function getRegistrationUsage(): string {
+  return [
+    "Choose an explicit Discord command registration scope:",
+    "",
+    "  npm run register:commands:guild",
+    "  npm run register:commands:global",
+    "",
+    "Guild registration updates the configured DISCORD_TEST_GUILD_ID quickly for development.",
+    "Global registration updates production commands and can take time to appear in Discord clients."
+  ].join("\n");
+}
+
+function getRequiredEnv(
+  env: RegisterCommandsEnv,
+  scope: RegistrationScope
+): RegisterCommandsEnv & Required<Pick<RegisterCommandsEnv, "DISCORD_APPLICATION_ID" | "DISCORD_BOT_TOKEN">> {
+  const requiredNames: Array<keyof RegisterCommandsEnv> = [
     "DISCORD_APPLICATION_ID",
-    "DISCORD_BOT_TOKEN",
-    "DISCORD_TEST_GUILD_ID"
-  ].filter((name) => !env[name as keyof RegisterCommandsEnv]);
+    "DISCORD_BOT_TOKEN"
+  ];
+
+  if (scope === "guild") {
+    requiredNames.push("DISCORD_TEST_GUILD_ID");
+  }
+
+  const missing = requiredNames.filter((name) => !env[name]);
 
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
@@ -81,22 +136,27 @@ function getRequiredEnv(env: RegisterCommandsEnv): Required<RegisterCommandsEnv>
     DISCORD_APPLICATION_ID: env.DISCORD_APPLICATION_ID,
     DISCORD_BOT_TOKEN: env.DISCORD_BOT_TOKEN,
     DISCORD_TEST_GUILD_ID: env.DISCORD_TEST_GUILD_ID
-  } as Required<RegisterCommandsEnv>;
+  } as RegisterCommandsEnv &
+    Required<Pick<RegisterCommandsEnv, "DISCORD_APPLICATION_ID" | "DISCORD_BOT_TOKEN">>;
 }
 
-async function registerGuildCommands(env: RegisterCommandsEnv): Promise<void> {
-  const {
-    DISCORD_APPLICATION_ID,
-    DISCORD_BOT_TOKEN,
-    DISCORD_TEST_GUILD_ID
-  } = getRequiredEnv(env);
+export async function registerCommands({
+  env,
+  scope,
+  fetchImpl = fetch
+}: RegisterCommandsOptions): Promise<void> {
+  const requiredEnv = getRequiredEnv(env, scope);
+  const { DISCORD_APPLICATION_ID, DISCORD_BOT_TOKEN } = requiredEnv;
 
-  const route = Routes.applicationGuildCommands(
-    DISCORD_APPLICATION_ID,
-    DISCORD_TEST_GUILD_ID
-  );
+  const route =
+    scope === "guild"
+      ? Routes.applicationGuildCommands(
+          DISCORD_APPLICATION_ID,
+          requiredEnv.DISCORD_TEST_GUILD_ID as string
+        )
+      : Routes.applicationCommands(DISCORD_APPLICATION_ID);
 
-  const response = await fetch(`${DISCORD_API_BASE_URL}${route}`, {
+  const response = await fetchImpl(`${DISCORD_API_BASE_URL}${route}`, {
     method: "PUT",
     headers: {
       authorization: `Bot ${DISCORD_BOT_TOKEN}`,
@@ -114,24 +174,52 @@ async function registerGuildCommands(env: RegisterCommandsEnv): Promise<void> {
 
   console.log(
     JSON.stringify({
-      event: "discord_guild_commands_registered",
-      guildId: DISCORD_TEST_GUILD_ID,
+      event:
+        scope === "guild"
+          ? "discord_guild_commands_registered"
+          : "discord_global_commands_registered",
+      commandScope: scope,
+      ...(scope === "guild" ? { guildId: requiredEnv.DISCORD_TEST_GUILD_ID } : {}),
       commandCount: incidentCommands.length
     })
   );
 }
 
-try {
-  await registerGuildCommands({
-    ...loadDevVars(),
-    ...process.env
-  });
-} catch (error) {
-  console.error(
-    JSON.stringify({
-      event: "discord_guild_command_registration_failed",
-      message: error instanceof Error ? error.message : "Unknown registration error"
-    })
-  );
-  process.exitCode = 1;
+async function main(): Promise<void> {
+  let commandScope: RegistrationScope | "unknown" = "unknown";
+
+  try {
+    const parsedScope = parseRegistrationScope(process.argv.slice(2));
+
+    if (parsedScope === "help") {
+      console.log(getRegistrationUsage());
+      return;
+    }
+
+    commandScope = parsedScope;
+
+    await registerCommands({
+      env: {
+        ...loadDevVars(),
+        ...process.env
+      },
+      scope: commandScope
+    });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "discord_command_registration_failed",
+        commandScope,
+        commandCount: incidentCommands.length,
+        message: error instanceof Error ? error.message : "Unknown registration error"
+      })
+    );
+    process.exitCode = 1;
+  }
+}
+
+const entrypointPath = process.argv[1];
+
+if (entrypointPath && import.meta.url === pathToFileURL(entrypointPath).href) {
+  await main();
 }

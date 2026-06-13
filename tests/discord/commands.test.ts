@@ -40,7 +40,7 @@ describe("incidentCommands", () => {
     ).toBe(true);
   });
 
-  it("defines incident-config role with a required Discord role option", () => {
+  it("defines incident-config role and status subcommands", () => {
     const configCommand = incidentCommands.find(
       (command) => command.name === "incident-config"
     );
@@ -54,11 +54,18 @@ describe("incidentCommands", () => {
     expect(configCommand?.default_member_permissions).toBe(
       PermissionFlagsBits.ManageGuild.toString()
     );
+    expect(configCommand?.options?.map((option) => option.name)).toEqual([
+      "role",
+      "status"
+    ]);
     expect(roleSubcommand?.type).toBe(ApplicationCommandOptionType.Subcommand);
     expect(roleOption).toMatchObject({
       name: "role",
       type: ApplicationCommandOptionType.Role,
       required: true
     });
+    expect(
+      configCommand?.options?.find((option) => option.name === "status")?.type
+    ).toBe(ApplicationCommandOptionType.Subcommand);
   });
 });

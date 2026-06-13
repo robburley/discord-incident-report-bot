@@ -112,6 +112,20 @@ describe("DrizzleIncidentRepository", () => {
     });
   });
 
+  it("keeps guild configs independent across two guilds", async () => {
+    const guildA = await repository.upsertGuildConfig({
+      guildId: "guild-a",
+      managerRoleId: "role-a"
+    });
+    const guildB = await repository.upsertGuildConfig({
+      guildId: "guild-b",
+      managerRoleId: "role-b"
+    });
+
+    await expect(repository.getGuildConfig("guild-a")).resolves.toEqual(guildA);
+    await expect(repository.getGuildConfig("guild-b")).resolves.toEqual(guildB);
+  });
+
   it("allows only one active session per guild", async () => {
     const session = await repository.createSession({
       guildId: "guild-1",
@@ -128,6 +142,22 @@ describe("DrizzleIncidentRepository", () => {
     ).rejects.toBeInstanceOf(RepositoryConflictError);
 
     await expect(repository.getActiveSession("guild-1")).resolves.toEqual(session);
+  });
+
+  it("allows simultaneous active sessions in different guilds", async () => {
+    const guildA = await repository.createSession({
+      guildId: "guild-a",
+      channelId: "shared-channel",
+      startedByUserId: "same-user"
+    });
+    const guildB = await repository.createSession({
+      guildId: "guild-b",
+      channelId: "shared-channel",
+      startedByUserId: "same-user"
+    });
+
+    await expect(repository.getActiveSession("guild-a")).resolves.toEqual(guildA);
+    await expect(repository.getActiveSession("guild-b")).resolves.toEqual(guildB);
   });
 
   it("closes sessions and returns the latest closed session for a guild", async () => {
@@ -158,6 +188,43 @@ describe("DrizzleIncidentRepository", () => {
     ).resolves.toEqual(closedSecond);
   });
 
+  it("returns the latest closed session only for the requested guild", async () => {
+    const guildAOld = await repository.createSession({
+      guildId: "guild-a",
+      channelId: "channel-a-old",
+      startedByUserId: "manager-a"
+    });
+    await repository.closeSession({
+      sessionId: guildAOld.id,
+      endedByUserId: "manager-a"
+    });
+    const guildB = await repository.createSession({
+      guildId: "guild-b",
+      channelId: "channel-b",
+      startedByUserId: "manager-b"
+    });
+    const closedGuildB = await repository.closeSession({
+      sessionId: guildB.id,
+      endedByUserId: "manager-b"
+    });
+    const guildANew = await repository.createSession({
+      guildId: "guild-a",
+      channelId: "channel-a-new",
+      startedByUserId: "manager-a"
+    });
+    const closedGuildANew = await repository.closeSession({
+      sessionId: guildANew.id,
+      endedByUserId: "manager-a"
+    });
+
+    await expect(
+      repository.getLatestClosedSessionForGuild("guild-a")
+    ).resolves.toEqual(closedGuildANew);
+    await expect(
+      repository.getLatestClosedSessionForGuild("guild-b")
+    ).resolves.toEqual(closedGuildB);
+  });
+
   it("sorts reports by race, lap, turn, then creation time", async () => {
     const session = await repository.createSession({
       guildId: "guild-1",
@@ -177,6 +244,33 @@ describe("DrizzleIncidentRepository", () => {
       "i-3",
       "i-2",
       "i-1"
+    ]);
+  });
+
+  it("returns ordered reports for only the requested session", async () => {
+    const guildA = await repository.createSession({
+      guildId: "guild-a",
+      channelId: "shared-channel",
+      startedByUserId: "same-user"
+    });
+    const guildB = await repository.createSession({
+      guildId: "guild-b",
+      channelId: "shared-channel",
+      startedByUserId: "same-user"
+    });
+
+    await repository.insertReport(
+      reportInput(guildA.id, "guild-a-report", 1, 1, 1, "07", "guild-a")
+    );
+    await repository.insertReport(
+      reportInput(guildB.id, "guild-b-report", 1, 1, 1, "99", "guild-b")
+    );
+
+    await expect(repository.getOrderedReportsForSession(guildA.id)).resolves.toEqual([
+      expect.objectContaining({ discordInteractionId: "guild-a-report" })
+    ]);
+    await expect(repository.getOrderedReportsForSession(guildB.id)).resolves.toEqual([
+      expect.objectContaining({ discordInteractionId: "guild-b-report" })
     ]);
   });
 
@@ -249,11 +343,12 @@ function reportInput(
   raceNumber: number,
   lapNumber: number,
   turnNumber: number,
-  carNumber: string
+  carNumber: string,
+  guildId = "guild-1"
 ) {
   return {
     sessionId,
-    guildId: "guild-1",
+    guildId,
     submittedByUserId: "user-1",
     discordInteractionId,
     raceNumber,

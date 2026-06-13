@@ -5,13 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "register:commands": "node --experimental-strip-types scripts/register-commands.ts",
+    "register:commands": "node --experimental-strip-types scripts/register-commands.ts --help",
+    "register:commands:guild": "node --experimental-strip-types scripts/register-commands.ts --scope guild",
+    "register:commands:global": "node --experimental-strip-types scripts/register-commands.ts --scope global",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "wrangler d1 migrations apply incident-bot --local",
     "db:migrate:prod": "wrangler --config wrangler.prod.toml d1 migrations apply incident-bot --remote",
+    "secrets:set:discord-public-key": "wrangler --config wrangler.prod.toml secret put DISCORD_PUBLIC_KEY",
+    "secrets:set:discord-bot-token": "wrangler --config wrangler.prod.toml secret put DISCORD_BOT_TOKEN",
     "deploy": "wrangler --config wrangler.prod.toml deploy"
   },
   "dependencies": {

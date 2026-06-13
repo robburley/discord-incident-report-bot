@@ -66,6 +66,96 @@ describe("Discord interaction handlers", () => {
     });
   });
 
+  it("returns configured status for /incident-config status", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(configStatusInteraction(), {
+      repository
+    });
+
+    expect(result.body).toEqual({
+      type: 4,
+      data: {
+        content: "Incident bot is configured. Manager role: <@&manager-role>.",
+        flags: DISCORD_EPHEMERAL_MESSAGE_FLAG
+      }
+    });
+  });
+
+  it("returns setup guidance for /incident-config status when unconfigured", async () => {
+    const result = await handleDiscordInteraction(configStatusInteraction(), {
+      repository
+    });
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "No incident manager role is configured. This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+      }
+    });
+  });
+
+  it("rejects /incident-config status without Manage Guild", async () => {
+    const result = await handleDiscordInteraction(
+      configStatusInteraction({ permissions: "0" }),
+      { repository }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "You need Discord Manage Server permission to configure incidents."
+      }
+    });
+  });
+
+  it("returns setup guidance for incident commands in unconfigured servers", async () => {
+    const result = await handleDiscordInteraction(baseCommand("incident"), {
+      repository
+    });
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+      }
+    });
+  });
+
+  it("returns setup guidance for session commands in unconfigured servers", async () => {
+    const result = await handleDiscordInteraction(sessionInteraction("start"), {
+      repository
+    });
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+      }
+    });
+  });
+
+  it("edits deferred session commands with setup guidance when unconfigured", async () => {
+    const result = await handleDiscordInteraction(sessionInteraction("summary"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-summary",
+        content:
+          "This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+      }
+    ]);
+  });
+
   it("starts a session and schedules a public channel message", async () => {
     await seedConfig(repository);
 
@@ -225,6 +315,159 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
+  it("handles session commands independently across two guilds", async () => {
+    await seedConfig(repository, "guild-a", "manager-role-a");
+    await seedConfig(repository, "guild-b", "manager-role-b");
+
+    const guildAStart = await handleDiscordInteraction(
+      sessionInteraction("start", {
+        guildId: "guild-a",
+        channelId: "shared-channel",
+        userId: "same-user",
+        roles: ["manager-role-a"]
+      }),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+    const guildBStart = await handleDiscordInteraction(
+      sessionInteraction("start", {
+        guildId: "guild-b",
+        channelId: "shared-channel",
+        userId: "same-user",
+        roles: ["manager-role-b"]
+      }),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+    const guildADuplicate = await handleDiscordInteraction(
+      sessionInteraction("start", {
+        guildId: "guild-a",
+        channelId: "other-channel",
+        userId: "same-user",
+        roles: ["manager-role-a"]
+      }),
+      { repository }
+    );
+
+    await flushWaitUntil();
+
+    expect(guildAStart.body).toMatchObject({
+      data: { content: "Incident session started." }
+    });
+    expect(guildBStart.body).toMatchObject({
+      data: { content: "Incident session started." }
+    });
+    expect(guildADuplicate.body).toMatchObject({
+      data: {
+        content: "An incident session is already active for this server."
+      }
+    });
+    expect(repository.sessions).toMatchObject([
+      { guildId: "guild-a", channelId: "shared-channel", status: "active" },
+      { guildId: "guild-b", channelId: "shared-channel", status: "active" }
+    ]);
+  });
+
+  it("reposts the latest closed summary for only the invoking guild", async () => {
+    await seedConfig(repository, "guild-a", "manager-role-a");
+    await seedConfig(repository, "guild-b", "manager-role-b");
+    const guildASession = await seedActiveSession(
+      repository,
+      "guild-a",
+      "shared-channel"
+    );
+    const guildBSession = await seedActiveSession(
+      repository,
+      "guild-b",
+      "shared-channel"
+    );
+    await repository.insertReport(
+      reportInput(guildASession, "guild-a-report", "same-user")
+    );
+    await repository.insertReport(
+      reportInput(guildBSession, "guild-b-report", "same-user")
+    );
+    await repository.closeSession({
+      sessionId: guildASession.id,
+      endedByUserId: "manager-a"
+    });
+    await repository.closeSession({
+      sessionId: guildBSession.id,
+      endedByUserId: "manager-b"
+    });
+
+    const result = await handleDiscordInteraction(
+      sessionInteraction("summary", {
+        guildId: "guild-a",
+        channelId: "shared-channel",
+        userId: "manager-a",
+        roles: ["manager-role-a"]
+      }),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(restClient.messages).toHaveLength(1);
+    expect(restClient.messages[0]).toMatchObject({
+      channelId: "shared-channel"
+    });
+    expect(restClient.messages[0]?.content).toContain("guild-a-report");
+    expect(restClient.messages[0]?.content).not.toContain("guild-b-report");
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-summary-guild-a",
+        content: "Latest incident session summary reposted."
+      }
+    ]);
+  });
+
+  it("keeps an unconfigured guild blocked while another guild is configured", async () => {
+    await seedConfig(repository, "guild-a", "manager-role");
+    await seedActiveSession(repository, "guild-a", "channel-a");
+
+    const configured = await handleDiscordInteraction(
+      baseCommand("incident", {
+        guildId: "guild-a",
+        channelId: "channel-a",
+        roles: ["manager-role"]
+      }),
+      { repository }
+    );
+    const unconfigured = await handleDiscordInteraction(
+      baseCommand("incident", {
+        guildId: "guild-b",
+        channelId: "channel-b",
+        roles: ["manager-role"]
+      }),
+      { repository }
+    );
+
+    expect(configured.body).toMatchObject({
+      type: 9,
+      data: { custom_id: INCIDENT_REPORT_MODAL_CUSTOM_ID }
+    });
+    expect(unconfigured.body).toMatchObject({
+      data: {
+        content:
+          "This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+      }
+    });
+  });
+
   function captureWaitUntil(promise: Promise<unknown>): void {
     waitUntilPromises.push(promise);
   }
@@ -234,14 +477,22 @@ describe("Discord interaction handlers", () => {
   }
 });
 
-function baseCommand(name: string) {
+function baseCommand(
+  name: string,
+  input: {
+    readonly guildId?: string;
+    readonly channelId?: string;
+    readonly userId?: string;
+    readonly roles?: readonly string[];
+  } = {}
+) {
   return {
     type: 2,
-    guild_id: "guild-1",
-    channel_id: "channel-1",
+    guild_id: input.guildId ?? "guild-1",
+    channel_id: input.channelId ?? "channel-1",
     member: {
-      user: { id: "user-1" },
-      roles: ["manager-role"],
+      user: { id: input.userId ?? "user-1" },
+      roles: input.roles ?? ["manager-role"],
       permissions: PermissionFlagsBits.ManageGuild.toString()
     },
     data: { name }
@@ -268,14 +519,37 @@ function configRoleInteraction(input: { readonly permissions?: string } = {}) {
   };
 }
 
-function sessionInteraction(subcommand: string) {
+function configStatusInteraction(input: { readonly permissions?: string } = {}) {
   return {
-    ...baseCommand("incident-session"),
-    application_id: "app-1",
-    token: `token-${subcommand}`,
+    ...baseCommand("incident-config"),
     member: {
-      user: { id: "manager-1" },
-      roles: ["manager-role"],
+      user: { id: "user-1" },
+      roles: [],
+      permissions: input.permissions ?? PermissionFlagsBits.ManageGuild.toString()
+    },
+    data: {
+      name: "incident-config",
+      options: [{ name: "status" }]
+    }
+  };
+}
+
+function sessionInteraction(
+  subcommand: string,
+  input: {
+    readonly guildId?: string;
+    readonly channelId?: string;
+    readonly userId?: string;
+    readonly roles?: readonly string[];
+  } = {}
+) {
+  return {
+    ...baseCommand("incident-session", input),
+    application_id: "app-1",
+    token: input.guildId ? `token-${subcommand}-${input.guildId}` : `token-${subcommand}`,
+    member: {
+      user: { id: input.userId ?? "manager-1" },
+      roles: input.roles ?? ["manager-role"],
       permissions: "0"
     },
     data: {
@@ -323,31 +597,38 @@ function modalRow(customId: string, value: string) {
   };
 }
 
-async function seedConfig(repository: MemoryIncidentRepository): Promise<void> {
+async function seedConfig(
+  repository: MemoryIncidentRepository,
+  guildId = "guild-1",
+  managerRoleId = "manager-role"
+): Promise<void> {
   await repository.upsertGuildConfig({
-    guildId: "guild-1",
-    managerRoleId: "manager-role"
+    guildId,
+    managerRoleId
   });
 }
 
 async function seedActiveSession(
-  repository: MemoryIncidentRepository
+  repository: MemoryIncidentRepository,
+  guildId = "guild-1",
+  channelId = "channel-1"
 ): Promise<IncidentSession> {
   return repository.createSession({
-    guildId: "guild-1",
-    channelId: "channel-1",
+    guildId,
+    channelId,
     startedByUserId: "manager-1"
   });
 }
 
 function reportInput(
   session: IncidentSession,
-  discordInteractionId: string
+  discordInteractionId: string,
+  submittedByUserId = "user-1"
 ): InsertReportInput {
   return {
     sessionId: session.id,
     guildId: session.guildId,
-    submittedByUserId: "user-1",
+    submittedByUserId,
     discordInteractionId,
     raceNumber: 1,
     lapNumber: 2,

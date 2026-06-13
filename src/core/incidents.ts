@@ -2,6 +2,7 @@ import type {
   IncidentReport,
   IncidentRepository
 } from "../db/repository";
+import { INCIDENT_SETUP_MESSAGE } from "./config";
 
 const CAR_NUMBER_PATTERN = /^[A-Za-z0-9_-]{1,12}$/;
 
@@ -104,7 +105,7 @@ export async function createIncidentReport(
   if (!config) {
     return {
       status: "guild_not_configured",
-      message: "Configure an incident manager role before submitting incidents."
+      message: INCIDENT_SETUP_MESSAGE
     };
   }
 
