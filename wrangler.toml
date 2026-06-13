@@ -1,0 +1,8 @@
+name = "incident-bot"
+main = "src/platform/cloudflare.ts"
+compatibility_date = "2024-11-27"
+
+[[d1_databases]]
+binding = "INCIDENT_DB"
+database_name = "incident-bot"
+database_id = "00000000-0000-0000-0000-000000000000"

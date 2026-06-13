@@ -1,0 +1,33 @@
+{
+  "name": "incident-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "register:commands": "node --experimental-strip-types scripts/register-commands.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply incident-bot --local",
+    "db:migrate:prod": "wrangler d1 migrations apply incident-bot --remote",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@discordjs/builders": "^1.8.2",
+    "discord-api-types": "^0.37.115",
+    "discord-interactions": "^4.1.0",
+    "drizzle-orm": "^0.36.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.3",
+    "better-sqlite3": "^12.10.0",
+    "drizzle-kit": "^0.27.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.93.0"
+  }
+}
