@@ -6,3 +6,18 @@ compatibility_date = "2024-11-27"
 binding = "INCIDENT_DB"
 database_name = "incident-bot"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
