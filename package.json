@@ -11,8 +11,8 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "wrangler d1 migrations apply incident-bot --local",
-    "db:migrate:prod": "wrangler d1 migrations apply incident-bot --remote",
-    "deploy": "wrangler deploy"
+    "db:migrate:prod": "wrangler --config wrangler.prod.toml d1 migrations apply incident-bot --remote",
+    "deploy": "wrangler --config wrangler.prod.toml deploy"
   },
   "dependencies": {
     "@discordjs/builders": "^1.8.2",
@@ -28,6 +28,6 @@
     "drizzle-kit": "^0.27.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
-    "wrangler": "^3.93.0"
+    "wrangler": "^4.100.0"
   }
 }

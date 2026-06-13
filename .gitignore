@@ -1,6 +1,8 @@
 node_modules/
 .wrangler/
+.wrangler-build/
 .wrangler-config/
+wrangler.prod.toml
 planning/
 .dev.vars
 .dev.vars.*

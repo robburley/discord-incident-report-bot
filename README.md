@@ -46,8 +46,8 @@ npm run dev
 `npm run db:migrate` applies migrations to Wrangler's local D1 database. The
 local binding is named `INCIDENT_DB` in `wrangler.toml`.
 
-Apply migrations to the production D1 database after `wrangler.toml` contains
-the real production database ID:
+Apply migrations to the production D1 database after `wrangler.prod.toml`
+contains the real production database ID:
 
 ```sh
 npm run db:migrate:prod
@@ -134,8 +134,15 @@ the active Wrangler port.
 
 Production deploys use the same Worker entrypoint and `INCIDENT_DB` binding.
 The committed `wrangler.toml` includes the binding shape with a placeholder
-database ID. Create the production D1 database, then replace the placeholder
-`database_id` with the ID printed by Wrangler:
+database ID. Keep the real production database ID in `wrangler.prod.toml`,
+which is ignored by Git:
+
+```sh
+cp wrangler.toml wrangler.prod.toml
+```
+
+Create the production D1 database, then set `database_id` in
+`wrangler.prod.toml` to the ID printed by Wrangler:
 
 ```sh
 wrangler d1 create incident-bot

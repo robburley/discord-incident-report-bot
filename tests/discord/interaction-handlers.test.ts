@@ -163,6 +163,13 @@ describe("Discord interaction handlers", () => {
           "Incident session closed for channel channel-1.\n\nRace 1\nLap 2\nTurn 3: car 07 reported by user-1"
       }
     ]);
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-end",
+        content: "Incident session ended and summary posted."
+      }
+    ]);
   });
 
   it("defers /incident-session summary and reposts the latest closed summary", async () => {
@@ -188,6 +195,13 @@ describe("Discord interaction handlers", () => {
       channelId: "channel-1"
     });
     expect(restClient.messages[0]?.content).toContain("car 07");
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-summary",
+        content: "Latest incident session summary reposted."
+      }
+    ]);
   });
 
   function captureWaitUntil(promise: Promise<unknown>): void {
@@ -236,6 +250,8 @@ function configRoleInteraction(input: { readonly permissions?: string } = {}) {
 function sessionInteraction(subcommand: string) {
   return {
     ...baseCommand("incident-session"),
+    application_id: "app-1",
+    token: `token-${subcommand}`,
     member: {
       user: { id: "manager-1" },
       roles: ["manager-role"],
@@ -316,12 +332,25 @@ function reportInput(
 
 class MemoryDiscordRestClient {
   readonly messages: { readonly channelId: string; readonly content: string }[] = [];
+  readonly edits: {
+    readonly applicationId: string;
+    readonly interactionToken: string;
+    readonly content: string;
+  }[] = [];
 
   async createChannelMessage(input: {
     readonly channelId: string;
     readonly content: string;
   }): Promise<void> {
     this.messages.push(input);
+  }
+
+  async editOriginalInteractionResponse(input: {
+    readonly applicationId: string;
+    readonly interactionToken: string;
+    readonly content: string;
+  }): Promise<void> {
+    this.edits.push(input);
   }
 }
 

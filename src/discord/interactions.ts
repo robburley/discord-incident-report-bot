@@ -69,6 +69,8 @@ interface DiscordModalComponent {
 
 interface DiscordInteractionPayload {
   readonly id?: unknown;
+  readonly application_id?: unknown;
+  readonly token?: unknown;
   readonly type?: unknown;
   readonly guild_id?: unknown;
   readonly channel_id?: unknown;
@@ -230,6 +232,12 @@ async function handleSessionCommand(
   }
 
   if (subcommand?.name === "end") {
+    const deferredContext = getDeferredInteractionContext(interaction);
+
+    if (!deferredContext) {
+      return ok(ephemeralDiscordMessage("Malformed Discord interaction token."));
+    }
+
     scheduleSummaryAction(dependencies, async () => {
       const result = await endIncidentSession({
         repository,
@@ -245,18 +253,34 @@ async function handleSessionCommand(
           channelId: context.channelId,
           status: result.status
         });
+        await editDeferredResponse(dependencies, {
+          ...deferredContext,
+          content: result.message
+        });
         return;
       }
 
-      await postSummaryMessages(dependencies, result.session.channelId, [
+      const posted = await postSummaryMessages(dependencies, result.session.channelId, [
         ...result.summaryMessages
       ]);
+      await editDeferredResponse(dependencies, {
+        ...deferredContext,
+        content: posted
+          ? "Incident session ended and summary posted."
+          : "Incident session ended, but I could not post the summary. Check the bot can view and send messages in this channel, then run `/incident-session summary`."
+      });
     });
 
     return ok(deferredEphemeralDiscordMessage());
   }
 
   if (subcommand?.name === "summary") {
+    const deferredContext = getDeferredInteractionContext(interaction);
+
+    if (!deferredContext) {
+      return ok(ephemeralDiscordMessage("Malformed Discord interaction token."));
+    }
+
     scheduleSummaryAction(dependencies, async () => {
       const result = await getLatestClosedSessionSummary({
         repository,
@@ -272,12 +296,22 @@ async function handleSessionCommand(
           channelId: context.channelId,
           status: result.status
         });
+        await editDeferredResponse(dependencies, {
+          ...deferredContext,
+          content: result.message
+        });
         return;
       }
 
-      await postSummaryMessages(dependencies, result.session.channelId, [
+      const posted = await postSummaryMessages(dependencies, result.session.channelId, [
         ...result.summaryMessages
       ]);
+      await editDeferredResponse(dependencies, {
+        ...deferredContext,
+        content: posted
+          ? "Latest incident session summary reposted."
+          : "I could not repost the latest summary. Check the bot can view and send messages in the original session channel, then try again."
+      });
     });
 
     return ok(deferredEphemeralDiscordMessage());
@@ -494,6 +528,27 @@ function hasManageGuildPermission(permissions: unknown): boolean {
   }
 }
 
+function getDeferredInteractionContext(
+  interaction: DiscordInteractionPayload
+): {
+  readonly applicationId: string;
+  readonly interactionToken: string;
+} | null {
+  if (
+    typeof interaction.application_id !== "string" ||
+    interaction.application_id === "" ||
+    typeof interaction.token !== "string" ||
+    interaction.token === ""
+  ) {
+    return null;
+  }
+
+  return {
+    applicationId: interaction.application_id,
+    interactionToken: interaction.token
+  };
+}
+
 function scheduleChannelPosts(
   dependencies: InteractionHandlerDependencies,
   channelId: string,
@@ -514,21 +569,52 @@ async function postSummaryMessages(
   dependencies: InteractionHandlerDependencies,
   channelId: string,
   messages: readonly string[]
-): Promise<void> {
+): Promise<boolean> {
   if (!dependencies.restClient) {
-    return;
+    console.error({
+      event: "discord_rest_client_missing",
+      channelId
+    });
+    return false;
   }
+
+  let allPosted = true;
 
   for (const content of messages) {
     try {
       await dependencies.restClient.createChannelMessage({ channelId, content });
     } catch (error) {
+      allPosted = false;
       console.error({
         event: "discord_rest_message_post_failed",
         channelId,
         message: error instanceof Error ? error.message : "Unknown Discord REST error"
       });
     }
+  }
+
+  return allPosted;
+}
+
+async function editDeferredResponse(
+  dependencies: InteractionHandlerDependencies,
+  input: {
+    readonly applicationId: string;
+    readonly interactionToken: string;
+    readonly content: string;
+  }
+): Promise<void> {
+  if (!dependencies.restClient) {
+    return;
+  }
+
+  try {
+    await dependencies.restClient.editOriginalInteractionResponse(input);
+  } catch (error) {
+    console.error({
+      event: "discord_rest_interaction_response_edit_failed",
+      message: error instanceof Error ? error.message : "Unknown Discord REST error"
+    });
   }
 }
 
