@@ -288,10 +288,17 @@ describe("core business logic", () => {
     const reports = await repository.getOrderedReportsForSession(session.id);
     const summary = formatSessionSummary({ session, reports });
 
-    expect(summary.indexOf("Turn 2: car 07")).toBeLessThan(
-      summary.indexOf("Turn 3: car 12A")
+    expect(summary).toContain("`Race  Lap  Turn  Car  ID             User`");
+    expect(
+      summary.indexOf("`1     1    2     07   interaction-3` <@user-1>")
+    ).toBeLessThan(
+      summary.indexOf("`1     1    3     12A  interaction-2` <@user-1>")
     );
-    expect(summary.indexOf("Race 1")).toBeLessThan(summary.indexOf("Race 2"));
+    expect(
+      summary.indexOf("`1     1    3     12A  interaction-2` <@user-1>")
+    ).toBeLessThan(
+      summary.indexOf("`2     1    1     99   interaction-1` <@user-1>")
+    );
     expect(splitDiscordMessage("aaaa\nbbbb\ncccc", 9)).toEqual([
       "aaaa\nbbbb",
       "cccc"
@@ -322,7 +329,7 @@ describe("core business logic", () => {
     expect(result.status).toBe("found");
     expect(result.status === "found" ? result.session.id : "").toBe(second.id);
     expect(result.status === "found" ? result.summaryMessages[0] : "").toContain(
-      "car 07"
+      "`1     1    1     07   interaction-1` <@user-1>"
     );
   });
 });

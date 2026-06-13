@@ -1,5 +1,5 @@
 import { generateKeyPairSync, sign } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import worker from "../../src/platform/cloudflare";
 
@@ -9,6 +9,10 @@ interface SigningFixture {
 }
 
 describe("Cloudflare interaction entrypoint", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("verifies the raw request body before returning a ping response", async () => {
     const fixture = createSigningFixture();
     const body = JSON.stringify({ type: 1 });
@@ -57,6 +61,33 @@ describe("Cloudflare interaction entrypoint", () => {
     await expectJsonResponse(response, 401, {
       error: "Invalid request signature."
     });
+  });
+
+  it("does not log raw bodies or signature header values", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fixture = createSigningFixture();
+    const signedBody = JSON.stringify({ type: 1 });
+    const sentBody = JSON.stringify({
+      type: 1,
+      token: "raw-body-token-that-must-not-be-logged"
+    });
+    const headers = fixture.signBody(signedBody);
+    const signature = headers.get("X-Signature-Ed25519");
+
+    await worker.fetch(
+      new Request("https://example.com/", {
+        method: "POST",
+        body: sentBody,
+        headers
+      }),
+      { DISCORD_PUBLIC_KEY: fixture.publicKeyHex }
+    );
+
+    const logged = JSON.stringify(logSpy.mock.calls);
+
+    expect(logged).not.toContain(sentBody);
+    expect(logged).not.toContain("raw-body-token-that-must-not-be-logged");
+    expect(logged).not.toContain(signature);
   });
 
   it("returns 400 for signed malformed JSON", async () => {

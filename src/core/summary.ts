@@ -7,6 +7,8 @@ export interface FormatSessionSummaryInput {
   readonly reports: readonly IncidentReport[];
 }
 
+const SUMMARY_TABLE_HEADERS = ["Race", "Lap", "Turn", "Car", "ID", "User"] as const;
+
 export function formatSessionSummary(input: FormatSessionSummaryInput): string {
   const lines = [
     `Incident session closed for <#${input.session.channelId}>.`
@@ -17,27 +19,39 @@ export function formatSessionSummary(input: FormatSessionSummaryInput): string {
     return lines.join("\n");
   }
 
-  let currentRace: number | null = null;
-  let currentLap: number | null = null;
-
-  for (const report of input.reports) {
-    if (report.raceNumber !== currentRace) {
-      currentRace = report.raceNumber;
-      currentLap = null;
-      lines.push("", `Race ${report.raceNumber}`);
-    }
-
-    if (report.lapNumber !== currentLap) {
-      currentLap = report.lapNumber;
-      lines.push(`Lap ${report.lapNumber}`);
-    }
-
-    lines.push(
-      `Turn ${report.turnNumber}: car ${report.carNumber} reported by <@${report.submittedByUserId}>`
-    );
-  }
+  lines.push("", ...formatIncidentTable(input.reports));
 
   return lines.join("\n");
+}
+
+function formatIncidentTable(reports: readonly IncidentReport[]): string[] {
+  const rows = reports.map((report) => ({
+    cells: [
+      report.raceNumber.toString(),
+      report.lapNumber.toString(),
+      report.turnNumber.toString(),
+      report.carNumber,
+      report.discordInteractionId
+    ],
+    userMention: `<@${report.submittedByUserId}>`
+  }));
+  const widths = SUMMARY_TABLE_HEADERS.map((header, columnIndex) =>
+    Math.max(
+      header.length,
+      ...rows.map((row) => row.cells[columnIndex]?.length ?? 0)
+    )
+  );
+  const formatCells = (cells: readonly string[]) =>
+    cells
+      .map((cell, columnIndex) => cell.padEnd(widths[columnIndex] ?? 0))
+      .join("  ");
+
+  return [
+    `\`${formatCells(SUMMARY_TABLE_HEADERS)}\``,
+    ...rows.map(
+      (row) => `\`${formatCells(row.cells)}\` ${row.userMention}`
+    )
+  ];
 }
 
 export function splitDiscordMessage(

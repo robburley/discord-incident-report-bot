@@ -136,6 +136,25 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
+  it("uses the server-side active session for modal submissions", async () => {
+    await seedConfig(repository);
+    const activeSession = await seedActiveSession(repository);
+
+    await handleDiscordInteraction(
+      modalSubmitInteraction({
+        extraComponents: [modalRow("session_id", "client-controlled-session-id")]
+      }),
+      { repository }
+    );
+
+    expect(repository.reports).toMatchObject([
+      {
+        sessionId: activeSession.id,
+        discordInteractionId: "modal-interaction-1"
+      }
+    ]);
+  });
+
   it("defers /incident-session end and posts final summary messages", async () => {
     await seedConfig(repository);
     const session = await seedActiveSession(repository);
@@ -160,7 +179,7 @@ describe("Discord interaction handlers", () => {
       {
         channelId: "channel-1",
         content:
-          "Incident session closed for <#channel-1>.\n\nRace 1\nLap 2\nTurn 3: car 07 reported by <@user-1>"
+          "Incident session closed for <#channel-1>.\n\n`Race  Lap  Turn  Car  ID                    User`\n`1     2    3     07   report-interaction-1` <@user-1>"
       }
     ]);
     expect(restClient.edits).toEqual([
@@ -194,7 +213,9 @@ describe("Discord interaction handlers", () => {
     expect(restClient.messages[0]).toMatchObject({
       channelId: "channel-1"
     });
-    expect(restClient.messages[0]?.content).toContain("car 07");
+    expect(restClient.messages[0]?.content).toContain(
+      "`1     2    3     07   report-interaction-1` <@user-1>"
+    );
     expect(restClient.edits).toEqual([
       {
         applicationId: "app-1",
@@ -264,7 +285,11 @@ function sessionInteraction(subcommand: string) {
   };
 }
 
-function modalSubmitInteraction() {
+function modalSubmitInteraction(
+  input: {
+    readonly extraComponents?: readonly ReturnType<typeof modalRow>[];
+  } = {}
+) {
   return {
     type: 5,
     id: "modal-interaction-1",
@@ -280,7 +305,8 @@ function modalSubmitInteraction() {
         modalRow(RACE_NUMBER_INPUT_ID, "1"),
         modalRow(LAP_NUMBER_INPUT_ID, "2"),
         modalRow(TURN_NUMBER_INPUT_ID, "3"),
-        modalRow(CAR_NUMBER_INPUT_ID, "07")
+        modalRow(CAR_NUMBER_INPUT_ID, "07"),
+        ...(input.extraComponents ?? [])
       ]
     }
   };
