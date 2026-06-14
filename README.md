@@ -44,7 +44,8 @@ npm run dev
 ```
 
 `npm run db:migrate` applies migrations to Wrangler's local D1 database. The
-local binding is named `INCIDENT_DB` in `wrangler.toml`.
+local binding is named `INCIDENT_DB` in `wrangler.toml`. Local migrations are
+safe to rerun; Wrangler records which migration files have already been applied.
 
 Apply migrations to the production D1 database after `wrangler.prod.toml`
 contains the real production database ID:
@@ -173,6 +174,125 @@ The status command is visible only to members with Discord's `Manage Server`
 permission. It reports the configured manager role, or tells the admin to run
 `/incident-config role role:<manager role>` when setup has not been completed.
 
+## Incident Workflow
+
+Incident sessions move through this status flow:
+
+```text
+reporting -> awaiting_stewards -> stewarding -> decided
+```
+
+Managers can reverse only the latest session in two controlled cases:
+
+```text
+awaiting_stewards -> reporting
+decided -> stewarding
+```
+
+Use `/incident-session start` in the incident channel to open reporting. Drivers
+can use `/incident` only while the latest session is in `reporting`, and reports
+must be submitted in that session's channel. A new reporting session cannot
+start until the previous latest session is `decided`.
+
+Use `/incident-session end` to close reporting. This moves the session to
+`awaiting_stewards` and posts the incident report summary in the original
+session channel. Managers can use `/incident-session summary` to repost that
+incident list later. This summary is the report list, not the stewarding
+decision summary.
+
+If reporting was ended too early, use `/incident-session reopen-reporting`.
+This only works when the latest session is still `awaiting_stewards`; once
+stewarding has started, reporting cannot be reopened.
+
+Use `/incident-session steward` to move the latest `awaiting_stewards` session
+to `stewarding`. Stewarding decisions are then recorded in the same original
+session channel.
+
+Use `/incident-session complete` to move the stewarding session to `decided`
+and post the final decision summary. Managers can use
+`/incident-session decisions` to repost the latest decided session's stewarding
+summary if the final messages need to be repeated or recovered after a posting
+failure.
+
+If decisions need correction after completion, use
+`/incident-session reopen-stewarding`. This only works on the latest `decided`
+session and preserves existing penalties so managers can update them. Complete
+the session again after corrections.
+
+## Penalty Presets And Decisions
+
+Admins configure penalty presets per server:
+
+```text
+/incident-config penalty-add name:<preset name> outcome:<summary text> delta:<optional integer>
+/incident-config penalty-remove penalty:<preset>
+/incident-config penalties
+```
+
+The optional `delta` can represent whatever total a league uses, such as points,
+seconds, strikes, or another numeric value. Removing a preset deactivates it
+instead of deleting it, so old stewarding summaries still show the original
+decision text. Penalty names, outcomes, and notes are stored as short
+single-line Discord-safe strings; line breaks are collapsed and backticks are
+normalized before display.
+
+Managers assign penalties during `stewarding`:
+
+```text
+/incident-session penalty incident-id:<id> affected-user:<driver> penalty:<preset> note:<optional note>
+/incident-session penalty-clear incident-id:<id>
+```
+
+Use the public incident ID shown in the incident summary. The `penalty` option
+uses autocomplete and returns up to Discord's limit of 25 active presets for the
+server. Autocomplete is a helper, not the source of truth: the bot validates
+that the submitted preset still exists and is active when the command runs.
+
+Assigning a penalty to the same incident and affected user again updates the
+existing decision. Assigning penalties to different affected users on the same
+incident creates separate decisions. Optional notes are stored with the
+decision and shown in the per-decision messages.
+
+`/incident-session penalty-clear` hard-deletes all penalty decisions for the
+given incident in the current stewarding session. It does not affect decisions
+for other incidents.
+
+## Command Responses
+
+Errors and manager confirmations are ephemeral. Workflow messages that change
+the visible session state are posted publicly in the original session channel.
+
+These commands post public channel messages:
+
+- `/incident-session start`: reporting started.
+- `/incident-session end`: one or more incident report summary messages.
+- `/incident-session steward`: stewarding started.
+- `/incident-session penalty`: recorded or updated penalty decision, including
+  affected driver mention and outcome.
+- `/incident-session penalty-clear`: cleared decision notice when decisions were
+  actually removed.
+- `/incident-session complete`: one or more stewarding decision summary
+  messages.
+- `/incident-session decisions`: one or more reposted stewarding decision
+  summary messages.
+- `/incident-session reopen-reporting`: reporting reopened.
+- `/incident-session reopen-stewarding`: stewarding reopened.
+
+These commands reply ephemerally only:
+
+- `/incident-config role`
+- `/incident-config status`
+- `/incident-config penalty-add`
+- `/incident-config penalty-remove`
+- `/incident-config penalties`
+
+`/incident-session end`, `/incident-session complete`,
+`/incident-session summary`, and `/incident-session decisions` defer the
+ephemeral response while posting summary messages. If posting fails, fix the
+bot's channel permissions or token configuration, then rerun
+`/incident-session summary` for report lists or `/incident-session decisions`
+for stewarding decisions.
+
 Second test server checklist:
 
 1. Confirm the deployed Worker URL is set as the Discord application's
@@ -186,8 +306,8 @@ Second test server checklist:
    incident channel.
 6. Run `/incident-config role role:<manager role>` in the second server.
 7. Run `/incident-config status` and confirm it reports the manager role.
-8. Start and end a short incident session to confirm command handling and
-   channel posting.
+8. Start, steward, complete, and repost a short incident session to confirm
+   command handling and channel posting.
 
 If commands do not appear:
 
@@ -285,6 +405,13 @@ use the same D1 database with tenant data keyed by Discord guild ID. Apply
 migrations before installing the bot into new servers or publishing command
 changes that depend on new database shape.
 
+For local verification, run `npm run db:migrate` against Wrangler's local D1
+database before starting `npm run dev`. For deployed databases, confirm
+`wrangler.prod.toml` points at the intended D1 database, set
+`CLOUDFLARE_API_TOKEN` in non-interactive environments, and run
+`npm run db:migrate:prod` before deploying command or Worker changes that
+depend on the new schema.
+
 After deploy, set the Discord application's Interactions Endpoint URL to the
 deployed Worker URL. Discord should validate the endpoint by sending a signed
 `PING` interaction. For local development, register commands for the test guild
@@ -361,8 +488,14 @@ The bot stores only the Discord data needed to operate incident sessions:
 - User IDs for session starters, session enders, and incident submitters.
 - Role IDs for configured incident manager roles.
 - Incident session status and timestamps.
+- Stewarding audit user IDs and timestamps for session start, completion, and
+  reopen actions.
 - Incident report details submitted through the modal: race number, lap number,
   turn number, and car number.
+- Penalty preset names, outcomes, optional numeric deltas, and soft-delete
+  status.
+- Penalty decisions, affected user IDs, optional notes, copied preset deltas,
+  and penalty audit timestamps.
 
 The bot does not store Discord bot tokens, Discord public keys, usernames,
 display names, email addresses, message contents outside the incident report
@@ -381,10 +514,10 @@ same private channel used to share the install URL. Server admins should report:
 Server data removal is an operator process in this version. If a server admin
 asks for stored data to be deleted, first confirm the target Discord guild ID,
 then back up the production D1 database if needed. Delete rows for that guild
-from `incident_reports`, `incident_sessions`, and `guild_configs`, in that
-order, so report and session data is removed before the server configuration.
-Verify `/incident-config status` reports the server as unconfigured if the bot
-is still installed.
+from `penalties`, `incident_reports`, `incident_sessions`, `penalty_presets`,
+and `guild_configs`, in that order, so decision, report, and session data is
+removed before presets and server configuration. Verify `/incident-config
+status` reports the server as unconfigured if the bot is still installed.
 
 There is no `/incident-config clear` command in this private release. Add one
 only if broader rollout needs server admins to self-service config or data
@@ -401,16 +534,35 @@ Private release checklist:
 6. Revisit Discord verification, hosted privacy terms, and self-service deletion
    before any public listing or broad distribution.
 
-Run a live smoke test in the test guild:
+Run a live stewarding smoke test in the test guild:
 
 1. Configure a manager role with `/incident-config role`.
 2. Verify setup with `/incident-config status`.
-3. Start a session with `/incident-session start`.
-4. Submit at least one incident with `/incident`.
-5. End the session with `/incident-session end` and confirm the summary posts.
-6. Run `/incident-session summary` and confirm the latest closed session summary
-   is reposted to the original session channel.
+3. Start a reporting session with `/incident-session start`.
+4. Submit at least two reports with `/incident`.
+5. Try to start a second session before the first is decided and confirm it is
+   rejected.
+6. Configure at least two penalty presets with `/incident-config penalty-add`.
+7. End reporting with `/incident-session end` and confirm the incident list
+   posts.
+8. Reopen to reporting with `/incident-session reopen-reporting`, submit
+   another report, then end reporting again.
+9. Start stewarding with `/incident-session steward`.
+10. Add one or more penalties with `/incident-session penalty`, using
+    autocomplete for the preset and selecting an affected user.
+11. Update one penalty for the same incident and affected user.
+12. Add a penalty note.
+13. Clear penalties for one incident with `/incident-session penalty-clear`.
+14. Remove a used preset with `/incident-config penalty-remove` and confirm it
+    disappears from `/incident-config penalties` and autocomplete.
+15. Complete stewarding with `/incident-session complete`.
+16. Reopen stewarding with `/incident-session reopen-stewarding`.
+17. Update a penalty, then complete stewarding again.
+18. Confirm the final decision summary contains only incidents with outcomes.
+19. Repost decisions with `/incident-session decisions`.
 
-If summary posting fails but the session closes, use `/incident-session summary`
-to recover the latest closed summary after fixing Discord permissions or token
-configuration.
+If incident-list posting fails after reporting ends, fix Discord permissions or
+token configuration and use `/incident-session summary` to repost the latest
+report list. If decision-summary posting fails after stewarding completes, fix
+the same posting issue and use `/incident-session decisions` to repost the
+latest stewarding decisions.

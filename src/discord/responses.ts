@@ -11,8 +11,14 @@ export interface DiscordInteractionResponse {
     readonly flags?: number;
     readonly custom_id?: string;
     readonly title?: string;
+    readonly choices?: readonly DiscordAutocompleteChoice[];
     readonly components?: readonly DiscordComponent[];
   };
+}
+
+export interface DiscordAutocompleteChoice {
+  readonly name: string;
+  readonly value: string;
 }
 
 export interface DiscordComponent {
@@ -66,6 +72,17 @@ export function deferredEphemeralDiscordMessage(): DiscordInteractionResponse {
     type: 5,
     data: {
       flags: DISCORD_EPHEMERAL_MESSAGE_FLAG
+    }
+  };
+}
+
+export function autocompleteDiscordResponse(
+  choices: readonly DiscordAutocompleteChoice[]
+): DiscordInteractionResponse {
+  return {
+    type: 8,
+    data: {
+      choices
     }
   };
 }

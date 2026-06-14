@@ -46,7 +46,7 @@ export type CreateIncidentReportResult =
   | {
       readonly status:
         | "guild_not_configured"
-        | "no_active_session"
+        | "no_reporting_session"
         | "wrong_channel"
         | "invalid_report"
         | "duplicate_report";
@@ -109,19 +109,24 @@ export async function createIncidentReport(
     };
   }
 
-  const activeSession = await input.repository.getActiveSession(input.guildId);
+  const reportingSession = await input.repository.getReportingSessionForGuild(
+    input.guildId
+  );
 
-  if (!activeSession) {
+  if (!reportingSession) {
     return {
-      status: "no_active_session",
-      message: "There is no active incident session."
+      status: "no_reporting_session",
+      message: "There is no reporting incident session."
     };
   }
 
-  if (input.channelId !== undefined && input.channelId !== activeSession.channelId) {
+  if (
+    input.channelId !== undefined &&
+    input.channelId !== reportingSession.channelId
+  ) {
     return {
       status: "wrong_channel",
-      message: "Incidents can only be reported in the active session channel."
+      message: "Incidents can only be reported in the reporting session channel."
     };
   }
 
@@ -147,7 +152,7 @@ export async function createIncidentReport(
   }
 
   const duplicate = await input.repository.findDuplicateReportForUser({
-    sessionId: activeSession.id,
+    sessionId: reportingSession.id,
     submittedByUserId: input.submittedByUserId,
     ...validation.value
   });
@@ -161,7 +166,7 @@ export async function createIncidentReport(
   }
 
   const inserted = await input.repository.insertReport({
-    sessionId: activeSession.id,
+    sessionId: reportingSession.id,
     guildId: input.guildId,
     submittedByUserId: input.submittedByUserId,
     discordInteractionId: input.discordInteractionId,

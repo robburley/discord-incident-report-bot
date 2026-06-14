@@ -23,7 +23,7 @@ describe("incidentCommands", () => {
     }
   });
 
-  it("defines incident-session start, end, and summary subcommands", () => {
+  it("defines incident-session workflow subcommands", () => {
     const sessionCommand = incidentCommands.find(
       (command) => command.name === "incident-session"
     );
@@ -31,7 +31,14 @@ describe("incidentCommands", () => {
     expect(sessionCommand?.options?.map((option) => option.name)).toEqual([
       "start",
       "end",
-      "summary"
+      "summary",
+      "steward",
+      "penalty",
+      "penalty-clear",
+      "complete",
+      "reopen-reporting",
+      "reopen-stewarding",
+      "decisions"
     ]);
     expect(
       sessionCommand?.options?.every(
@@ -40,7 +47,49 @@ describe("incidentCommands", () => {
     ).toBe(true);
   });
 
-  it("defines incident-config role and status subcommands", () => {
+  it("defines incident-session penalty options", () => {
+    const sessionCommand = incidentCommands.find(
+      (command) => command.name === "incident-session"
+    );
+    const penaltySubcommand = sessionCommand?.options?.find(
+      (option) => option.name === "penalty"
+    ) as APIApplicationCommandSubcommandOption | undefined;
+    const penaltyClearSubcommand = sessionCommand?.options?.find(
+      (option) => option.name === "penalty-clear"
+    ) as APIApplicationCommandSubcommandOption | undefined;
+
+    expect(penaltySubcommand?.options).toMatchObject([
+      {
+        name: "incident-id",
+        type: ApplicationCommandOptionType.String,
+        required: true
+      },
+      {
+        name: "affected-user",
+        type: ApplicationCommandOptionType.User,
+        required: true
+      },
+      {
+        name: "penalty",
+        type: ApplicationCommandOptionType.String,
+        required: true,
+        autocomplete: true
+      },
+      {
+        name: "note",
+        type: ApplicationCommandOptionType.String
+      }
+    ]);
+    expect(penaltyClearSubcommand?.options).toMatchObject([
+      {
+        name: "incident-id",
+        type: ApplicationCommandOptionType.String,
+        required: true
+      }
+    ]);
+  });
+
+  it("defines incident-config role, status, and penalty preset subcommands", () => {
     const configCommand = incidentCommands.find(
       (command) => command.name === "incident-config"
     );
@@ -50,13 +99,22 @@ describe("incidentCommands", () => {
     const roleOption = roleSubcommand?.options?.find(
       (option) => option.name === "role"
     ) as APIApplicationCommandBasicOption | undefined;
+    const penaltyAddSubcommand = configCommand?.options?.find(
+      (option) => option.name === "penalty-add"
+    ) as APIApplicationCommandSubcommandOption | undefined;
+    const penaltyRemoveSubcommand = configCommand?.options?.find(
+      (option) => option.name === "penalty-remove"
+    ) as APIApplicationCommandSubcommandOption | undefined;
 
     expect(configCommand?.default_member_permissions).toBe(
       PermissionFlagsBits.ManageGuild.toString()
     );
     expect(configCommand?.options?.map((option) => option.name)).toEqual([
       "role",
-      "status"
+      "status",
+      "penalty-add",
+      "penalty-remove",
+      "penalties"
     ]);
     expect(roleSubcommand?.type).toBe(ApplicationCommandOptionType.Subcommand);
     expect(roleOption).toMatchObject({
@@ -66,6 +124,33 @@ describe("incidentCommands", () => {
     });
     expect(
       configCommand?.options?.find((option) => option.name === "status")?.type
+    ).toBe(ApplicationCommandOptionType.Subcommand);
+    expect(penaltyAddSubcommand?.options).toMatchObject([
+      {
+        name: "name",
+        type: ApplicationCommandOptionType.String,
+        required: true
+      },
+      {
+        name: "outcome",
+        type: ApplicationCommandOptionType.String,
+        required: true
+      },
+      {
+        name: "delta",
+        type: ApplicationCommandOptionType.Integer
+      }
+    ]);
+    expect(penaltyRemoveSubcommand?.options).toMatchObject([
+      {
+        name: "penalty",
+        type: ApplicationCommandOptionType.String,
+        required: true,
+        autocomplete: true
+      }
+    ]);
+    expect(
+      configCommand?.options?.find((option) => option.name === "penalties")?.type
     ).toBe(ApplicationCommandOptionType.Subcommand);
   });
 });

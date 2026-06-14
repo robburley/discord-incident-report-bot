@@ -12,8 +12,12 @@ import {
 import { DISCORD_EPHEMERAL_MESSAGE_FLAG } from "../../src/discord/responses";
 import { RepositoryConflictError } from "../../src/db/repository";
 import type {
-  CloseSessionInput,
-  CreateSessionInput,
+  EndReportingSessionInput,
+  ClearPenaltiesForIncidentInput,
+  CompleteStewardingSessionInput,
+  CreatePenaltyPresetInput,
+  CreateReportingSessionInput,
+  DeactivatePenaltyPresetInput,
   DuplicateReportInput,
   GuildConfig,
   IncidentReport,
@@ -21,6 +25,16 @@ import type {
   IncidentSession,
   InsertReportInput,
   InsertReportResult,
+  Penalty,
+  PenaltyDecisionSummaryRow,
+  PenaltyPreset,
+  ReopenAwaitingStewardsSessionForReportingInput,
+  ReopenAwaitingStewardsSessionForReportingResult,
+  ReopenDecidedSessionForStewardingInput,
+  ReopenDecidedSessionForStewardingResult,
+  StartStewardingSessionInput,
+  UpsertPenaltyInput,
+  UpsertPenaltyResult,
   UpsertGuildConfigInput
 } from "../../src/db/repository";
 
@@ -181,9 +195,34 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
-  it("returns the incident report modal for /incident in the active channel", async () => {
+  it("allows server admins without the manager role to start a session", async () => {
     await seedConfig(repository);
-    await seedActiveSession(repository);
+
+    const result = await handleDiscordInteraction(
+      sessionInteraction("start", {
+        roles: ["driver-role"],
+        permissions: PermissionFlagsBits.ManageGuild.toString()
+      }),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+    await flushWaitUntil();
+
+    expect(result.body).toMatchObject({
+      data: { content: "Incident session started." }
+    });
+    expect(repository.sessions[0]).toMatchObject({
+      status: "reporting",
+      startedByUserId: "manager-1"
+    });
+  });
+
+  it("returns the incident report modal for /incident in the reporting channel", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
 
     const result = await handleDiscordInteraction(baseCommand("incident"), {
       repository
@@ -202,7 +241,7 @@ describe("Discord interaction handlers", () => {
 
   it("stores incident modal submissions", async () => {
     await seedConfig(repository);
-    await seedActiveSession(repository);
+    await seedReportingSession(repository);
 
     const result = await handleDiscordInteraction(modalSubmitInteraction(), {
       repository
@@ -226,9 +265,9 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
-  it("uses the server-side active session for modal submissions", async () => {
+  it("uses the server-side reporting session for modal submissions", async () => {
     await seedConfig(repository);
-    const activeSession = await seedActiveSession(repository);
+    const reportingSession = await seedReportingSession(repository);
 
     await handleDiscordInteraction(
       modalSubmitInteraction({
@@ -239,7 +278,7 @@ describe("Discord interaction handlers", () => {
 
     expect(repository.reports).toMatchObject([
       {
-        sessionId: activeSession.id,
+        sessionId: reportingSession.id,
         discordInteractionId: "modal-interaction-1"
       }
     ]);
@@ -247,7 +286,7 @@ describe("Discord interaction handlers", () => {
 
   it("defers /incident-session end and posts final summary messages", async () => {
     await seedConfig(repository);
-    const session = await seedActiveSession(repository);
+    const session = await seedReportingSession(repository);
     await repository.insertReport(reportInput(session, "report-interaction-1"));
 
     const result = await handleDiscordInteraction(sessionInteraction("end"), {
@@ -269,7 +308,7 @@ describe("Discord interaction handlers", () => {
       {
         channelId: "channel-1",
         content:
-          "Incident session closed for <#channel-1>.\n\n`Race  Lap  Turn  Car  ID                    User`\n`1     2    3     07   report-interaction-1` <@user-1>"
+          "Incident reporting ended for <#channel-1>.\n\n`Race  Lap  Turn  Car  ID                    User`\n`1     2    3     07   report-interaction-1` <@user-1>"
       }
     ]);
     expect(restClient.edits).toEqual([
@@ -281,11 +320,11 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
-  it("defers /incident-session summary and reposts the latest closed summary", async () => {
+  it("defers /incident-session summary and reposts the latest incident report summary", async () => {
     await seedConfig(repository);
-    const session = await seedActiveSession(repository);
+    const session = await seedReportingSession(repository);
     await repository.insertReport(reportInput(session, "report-interaction-1"));
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: session.id,
       endedByUserId: "manager-1"
     });
@@ -365,24 +404,25 @@ describe("Discord interaction handlers", () => {
     });
     expect(guildADuplicate.body).toMatchObject({
       data: {
-        content: "An incident session is already active for this server."
+        content:
+          "The previous incident session must be decided before starting a new one."
       }
     });
     expect(repository.sessions).toMatchObject([
-      { guildId: "guild-a", channelId: "shared-channel", status: "active" },
-      { guildId: "guild-b", channelId: "shared-channel", status: "active" }
+      { guildId: "guild-a", channelId: "shared-channel", status: "reporting" },
+      { guildId: "guild-b", channelId: "shared-channel", status: "reporting" }
     ]);
   });
 
-  it("reposts the latest closed summary for only the invoking guild", async () => {
+  it("reposts the latest incident report summary for only the invoking guild", async () => {
     await seedConfig(repository, "guild-a", "manager-role-a");
     await seedConfig(repository, "guild-b", "manager-role-b");
-    const guildASession = await seedActiveSession(
+    const guildASession = await seedReportingSession(
       repository,
       "guild-a",
       "shared-channel"
     );
-    const guildBSession = await seedActiveSession(
+    const guildBSession = await seedReportingSession(
       repository,
       "guild-b",
       "shared-channel"
@@ -393,11 +433,11 @@ describe("Discord interaction handlers", () => {
     await repository.insertReport(
       reportInput(guildBSession, "guild-b-report", "same-user")
     );
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildASession.id,
       endedByUserId: "manager-a"
     });
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildBSession.id,
       endedByUserId: "manager-b"
     });
@@ -435,9 +475,476 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
+  it("starts stewarding and schedules a public stewarding message", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.endReportingSession({
+      sessionId: session.id,
+      endedByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(sessionInteraction("steward"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    await flushWaitUntil();
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "Stewarding started for the latest session awaiting stewards."
+      }
+    });
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
+    expect(restClient.messages).toEqual([
+      {
+        channelId: "channel-1",
+        content:
+          "Stewarding has started for the incident session in <#channel-1>."
+      }
+    ]);
+  });
+
+  it("returns an ephemeral error when stewarding cannot start", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(sessionInteraction("steward"), {
+      repository
+    });
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "No incident session is awaiting stewards."
+      }
+    });
+  });
+
+  it("records a penalty and posts the decision publicly", async () => {
+    await seedConfig(repository);
+    const session = await seedStewardingSession(repository);
+    await repository.insertReport(reportInput(session, "incident-1"));
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Warning",
+      outcome: "Formal `warning`\nwith note",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(
+      sessionInteraction("penalty", {
+        options: [
+          { name: "incident-id", value: "incident-1" },
+          { name: "affected-user", value: "driver-1" },
+          { name: "penalty", value: preset.id },
+          { name: "note", value: "Reviewed `onboard`\nwithout issue" }
+        ]
+      }),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    const expected =
+      "Penalty recorded for <@driver-1> on incident incident-1: Formal 'warning' with note. Note: Reviewed 'onboard' without issue";
+    expect(result.body).toMatchObject({ data: { content: expected } });
+    expect(repository.penalties).toMatchObject([
+      {
+        affectedUserId: "driver-1",
+        outcome: "Formal 'warning' with note",
+        note: "Reviewed 'onboard' without issue"
+      }
+    ]);
+    expect(restClient.messages).toEqual([
+      {
+        channelId: "channel-1",
+        content: expected
+      }
+    ]);
+  });
+
+  it("rejects penalty commands without an affected user", async () => {
+    await seedConfig(repository);
+    const session = await seedStewardingSession(repository);
+    await repository.insertReport(reportInput(session, "incident-1"));
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Warning",
+      outcome: "Formal warning",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(
+      sessionInteraction("penalty", {
+        options: [
+          { name: "incident-id", value: "incident-1" },
+          { name: "penalty", value: preset.id }
+        ]
+      }),
+      { repository }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "Choose an affected user before assigning a penalty."
+      }
+    });
+  });
+
+  it("clears penalties for an incident and reports the removal count", async () => {
+    await seedConfig(repository);
+    const session = await seedStewardingSession(repository);
+    const report = await repository.insertReport(reportInput(session, "incident-1"));
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Penalty",
+      outcome: "5 seconds",
+      delta: 5,
+      createdByUserId: "manager-1"
+    });
+    await repository.upsertPenaltyForIncidentSession({
+      incidentSessionId: session.id,
+      incidentReportId: report.report.id,
+      affectedUserId: "driver-1",
+      penaltyPresetId: preset.id,
+      outcome: preset.outcome,
+      delta: preset.delta,
+      note: null,
+      createdByUserId: "manager-1",
+      updatedByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(
+      sessionInteraction("penalty-clear", {
+        options: [{ name: "incident-id", value: "incident-1" }]
+      }),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "Cleared 1 penalty decision(s) for incident incident-1."
+      }
+    });
+    expect(repository.penalties).toEqual([]);
+    expect(restClient.messages).toEqual([
+      {
+        channelId: "channel-1",
+        content: "Penalty decisions were cleared for incident incident-1."
+      }
+    ]);
+  });
+
+  it("defers stewarding completion and posts the decision summary", async () => {
+    await seedConfig(repository);
+    const session = await seedStewardingSession(repository);
+    const report = await repository.insertReport(reportInput(session, "incident-1"));
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Penalty",
+      outcome: "5 seconds",
+      delta: 5,
+      createdByUserId: "manager-1"
+    });
+    await repository.upsertPenaltyForIncidentSession({
+      incidentSessionId: session.id,
+      incidentReportId: report.report.id,
+      affectedUserId: "driver-1",
+      penaltyPresetId: preset.id,
+      outcome: preset.outcome,
+      delta: preset.delta,
+      note: null,
+      createdByUserId: "manager-1",
+      updatedByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(sessionInteraction("complete"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(repository.sessions[0]).toMatchObject({ status: "decided" });
+    expect(restClient.messages[0]?.content).toContain("Stewarding decisions");
+    expect(restClient.messages[0]?.content).toContain("5 seconds");
+    expect(restClient.edits).toContainEqual({
+      applicationId: "app-1",
+      interactionToken: "token-complete",
+      content: "Stewarding completed and decision summary posted."
+    });
+  });
+
+  it("reports stewarding completion posting failures in the deferred response", async () => {
+    await seedConfig(repository);
+    await seedStewardingSession(repository);
+    restClient.failChannelMessages = true;
+
+    const result = await handleDiscordInteraction(sessionInteraction("complete"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-complete",
+        content:
+          "Stewarding completed, but I could not post the decision summary. Check the bot can view and send messages in this channel, then run /incident-session decisions."
+      }
+    ]);
+  });
+
+  it("reopens reporting and stewarding through session commands", async () => {
+    await seedConfig(repository);
+    const reporting = await seedReportingSession(repository);
+    await repository.endReportingSession({
+      sessionId: reporting.id,
+      endedByUserId: "manager-1"
+    });
+
+    const reopenedReporting = await handleDiscordInteraction(
+      sessionInteraction("reopen-reporting"),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    expect(reopenedReporting.body).toMatchObject({
+      data: { content: "Incident session reopened for reporting." }
+    });
+    expect(repository.sessions[0]).toMatchObject({ status: "reporting" });
+
+    await repository.endReportingSession({
+      sessionId: reporting.id,
+      endedByUserId: "manager-1"
+    });
+    await repository.startStewardingSession({
+      sessionId: reporting.id,
+      startedByUserId: "manager-1"
+    });
+    await repository.completeStewardingSession({
+      sessionId: reporting.id,
+      completedByUserId: "manager-1"
+    });
+
+    const reopenedStewarding = await handleDiscordInteraction(
+      sessionInteraction("reopen-stewarding"),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    expect(reopenedStewarding.body).toMatchObject({
+      data: { content: "Stewarding reopened for the latest decided session." }
+    });
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
+  });
+
+  it("defers decision summary reposts for the latest decided session", async () => {
+    await seedConfig(repository);
+    const session = await seedStewardingSession(repository);
+    const report = await repository.insertReport(reportInput(session, "incident-1"));
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Penalty",
+      outcome: "5 seconds",
+      delta: 5,
+      createdByUserId: "manager-1"
+    });
+    await repository.upsertPenaltyForIncidentSession({
+      incidentSessionId: session.id,
+      incidentReportId: report.report.id,
+      affectedUserId: "driver-1",
+      penaltyPresetId: preset.id,
+      outcome: preset.outcome,
+      delta: preset.delta,
+      note: null,
+      createdByUserId: "manager-1",
+      updatedByUserId: "manager-1"
+    });
+    await repository.completeStewardingSession({
+      sessionId: session.id,
+      completedByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(sessionInteraction("decisions"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(restClient.messages[0]?.content).toContain("Stewarding decisions");
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-decisions",
+        content: "Latest stewarding decisions reposted."
+      }
+    ]);
+  });
+
+  it("edits deferred decision reposts when no decided session exists", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(sessionInteraction("decisions"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-decisions",
+        content: "No decided incident session is available yet."
+      }
+    ]);
+  });
+
+  it("adds, lists, and removes penalty presets through config commands", async () => {
+    await seedConfig(repository);
+
+    const added = await handleDiscordInteraction(
+      configPenaltyAddInteraction("Warning", "Formal warning"),
+      { repository }
+    );
+    const listed = await handleDiscordInteraction(configPenaltiesInteraction(), {
+      repository
+    });
+    const removed = await handleDiscordInteraction(
+      configPenaltyRemoveInteraction("preset-1"),
+      { repository }
+    );
+
+    expect(added.body).toMatchObject({
+      data: { content: "Penalty preset added: Warning." }
+    });
+    expect(listed.body).toMatchObject({
+      data: { content: "Configured penalty presets:\n- Warning" }
+    });
+    expect(removed.body).toMatchObject({
+      data: { content: "Penalty preset removed: Warning." }
+    });
+    expect(repository.penaltyPresets[0]).toMatchObject({ isActive: false });
+  });
+
+  it("truncates long penalty preset lists inside Discord's message limit", async () => {
+    await seedConfig(repository);
+
+    for (let index = 0; index < 40; index++) {
+      await repository.createPenaltyPreset({
+        guildId: "guild-1",
+        name: `Penalty ${index.toString().padStart(2, "0")} ${"x".repeat(80)}`,
+        outcome: `Long outcome ${index} ${"y".repeat(180)}`,
+        delta: null,
+        createdByUserId: "manager-1"
+      });
+    }
+
+    const listed = await handleDiscordInteraction(configPenaltiesInteraction(), {
+      repository
+    });
+
+    expect("data" in listed.body).toBe(true);
+    const content = "data" in listed.body ? listed.body.data.content ?? "" : "";
+
+    expect(content.length).toBeLessThanOrEqual(2_000);
+    expect(content).toContain("- Penalty 00");
+    expect(content).not.toContain("Long outcome");
+    expect(content).toMatch(/\.\.\. and \d+ other results$/);
+  });
+
+  it("returns active guild-scoped penalty preset autocomplete choices", async () => {
+    await seedConfig(repository);
+    await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Warning",
+      outcome: "Formal warning",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
+    await repository.createPenaltyPreset({
+      guildId: "guild-2",
+      name: "Wrong guild",
+      outcome: "Hidden",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(
+      autocompleteInteraction("incident-session", "penalty", "penalty", "War"),
+      { repository }
+    );
+
+    expect(result.body).toEqual({
+      type: 8,
+      data: {
+        choices: [{ name: "Warning", value: "preset-1" }]
+      }
+    });
+  });
+
+  it("returns no autocomplete choices for unsupported contexts", async () => {
+    await seedConfig(repository);
+    await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Warning",
+      outcome: "Formal warning",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(
+      autocompleteInteraction("incident-session", "complete", "penalty", "War"),
+      { repository }
+    );
+
+    expect(result.body).toEqual({
+      type: 8,
+      data: { choices: [] }
+    });
+  });
+
   it("keeps an unconfigured guild blocked while another guild is configured", async () => {
     await seedConfig(repository, "guild-a", "manager-role");
-    await seedActiveSession(repository, "guild-a", "channel-a");
+    await seedReportingSession(repository, "guild-a", "channel-a");
 
     const configured = await handleDiscordInteraction(
       baseCommand("incident", {
@@ -541,6 +1048,8 @@ function sessionInteraction(
     readonly channelId?: string;
     readonly userId?: string;
     readonly roles?: readonly string[];
+    readonly permissions?: string;
+    readonly options?: readonly { readonly name: string; readonly value: unknown }[];
   } = {}
 ) {
   return {
@@ -550,11 +1059,107 @@ function sessionInteraction(
     member: {
       user: { id: input.userId ?? "manager-1" },
       roles: input.roles ?? ["manager-role"],
-      permissions: "0"
+      permissions: input.permissions ?? "0"
     },
     data: {
       name: "incident-session",
-      options: [{ name: subcommand }]
+      options: [{ name: subcommand, options: input.options }]
+    }
+  };
+}
+
+function configPenaltyAddInteraction(
+  name: string,
+  outcome: string,
+  delta?: number
+) {
+  return {
+    ...baseCommand("incident-config"),
+    member: {
+      user: { id: "manager-1" },
+      roles: ["manager-role"],
+      permissions: PermissionFlagsBits.ManageGuild.toString()
+    },
+    data: {
+      name: "incident-config",
+      options: [
+        {
+          name: "penalty-add",
+          options: [
+            { name: "name", value: name },
+            { name: "outcome", value: outcome },
+            ...(typeof delta === "number" ? [{ name: "delta", value: delta }] : [])
+          ]
+        }
+      ]
+    }
+  };
+}
+
+function configPenaltyRemoveInteraction(penalty: string) {
+  return {
+    ...baseCommand("incident-config"),
+    member: {
+      user: { id: "manager-1" },
+      roles: ["manager-role"],
+      permissions: PermissionFlagsBits.ManageGuild.toString()
+    },
+    data: {
+      name: "incident-config",
+      options: [
+        {
+          name: "penalty-remove",
+          options: [{ name: "penalty", value: penalty }]
+        }
+      ]
+    }
+  };
+}
+
+function configPenaltiesInteraction() {
+  return {
+    ...baseCommand("incident-config"),
+    member: {
+      user: { id: "manager-1" },
+      roles: ["manager-role"],
+      permissions: PermissionFlagsBits.ManageGuild.toString()
+    },
+    data: {
+      name: "incident-config",
+      options: [{ name: "penalties" }]
+    }
+  };
+}
+
+function autocompleteInteraction(
+  commandName: string,
+  subcommandName: string,
+  focusedOptionName: string,
+  focusedValue: string
+) {
+  return {
+    type: 4,
+    guild_id: "guild-1",
+    channel_id: "channel-1",
+    member: {
+      user: { id: "manager-1" },
+      roles: ["manager-role"],
+      permissions: PermissionFlagsBits.ManageGuild.toString()
+    },
+    data: {
+      name: commandName,
+      options: [
+        {
+          name: subcommandName,
+          options: [
+            {
+              name: focusedOptionName,
+              value: focusedValue,
+              focused: true
+            }
+          ]
+        }
+      ]
     }
   };
 }
@@ -608,16 +1213,38 @@ async function seedConfig(
   });
 }
 
-async function seedActiveSession(
+async function seedReportingSession(
   repository: MemoryIncidentRepository,
   guildId = "guild-1",
   channelId = "channel-1"
 ): Promise<IncidentSession> {
-  return repository.createSession({
+  return repository.createReportingSession({
     guildId,
     channelId,
     startedByUserId: "manager-1"
   });
+}
+
+async function seedStewardingSession(
+  repository: MemoryIncidentRepository,
+  guildId = "guild-1",
+  channelId = "channel-1"
+): Promise<IncidentSession> {
+  const session = await seedReportingSession(repository, guildId, channelId);
+  await repository.endReportingSession({
+    sessionId: session.id,
+    endedByUserId: "manager-1"
+  });
+  const stewarding = await repository.startStewardingSession({
+    sessionId: session.id,
+    startedByUserId: "manager-1"
+  });
+
+  if (!stewarding) {
+    throw new Error("Unable to seed stewarding session.");
+  }
+
+  return stewarding;
 }
 
 function reportInput(
@@ -644,11 +1271,16 @@ class MemoryDiscordRestClient {
     readonly interactionToken: string;
     readonly content: string;
   }[] = [];
+  failChannelMessages = false;
 
   async createChannelMessage(input: {
     readonly channelId: string;
     readonly content: string;
   }): Promise<void> {
+    if (this.failChannelMessages) {
+      throw new Error("Message post failed.");
+    }
+
     this.messages.push(input);
   }
 
@@ -665,6 +1297,8 @@ class MemoryIncidentRepository implements IncidentRepository {
   readonly configs = new Map<string, GuildConfig>();
   readonly sessions: IncidentSession[] = [];
   readonly reports: IncidentReport[] = [];
+  readonly penaltyPresets: PenaltyPreset[] = [];
+  readonly penalties: Penalty[] = [];
   private now = 1_000;
   private idNumber = 1;
 
@@ -686,19 +1320,21 @@ class MemoryIncidentRepository implements IncidentRepository {
     return this.configs.get(guildId) ?? null;
   }
 
-  async getActiveSession(guildId: string): Promise<IncidentSession | null> {
+  async getReportingSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
     return (
       this.sessions.find(
-        (session) => session.guildId === guildId && session.status === "active"
+        (session) => session.guildId === guildId && session.status === "reporting"
       ) ?? null
     );
   }
 
-  async createSession(input: CreateSessionInput): Promise<IncidentSession> {
-    const active = await this.getActiveSession(input.guildId);
+  async createReportingSession(input: CreateReportingSessionInput): Promise<IncidentSession> {
+    const latest = this.getLatestSessionForGuild(input.guildId);
 
-    if (active) {
-      throw new RepositoryConflictError("Active session exists.");
+    if (latest && latest.status !== "decided") {
+      throw new RepositoryConflictError("Latest session is not decided.");
     }
 
     const session: IncidentSession = {
@@ -707,39 +1343,47 @@ class MemoryIncidentRepository implements IncidentRepository {
       channelId: input.channelId,
       startedByUserId: input.startedByUserId,
       endedByUserId: null,
-      status: "active",
+      status: "reporting",
       startedAt: this.now++,
-      endedAt: null
+      endedAt: null,
+      stewardingStartedByUserId: null,
+      stewardingCompletedByUserId: null,
+      lastReopenedByUserId: null,
+      stewardingStartedAt: null,
+      stewardingCompletedAt: null,
+      lastReopenedAt: null
     };
 
     this.sessions.push(session);
     return session;
   }
 
-  async closeSession(input: CloseSessionInput): Promise<IncidentSession | null> {
+  async endReportingSession(
+    input: EndReportingSessionInput
+  ): Promise<IncidentSession | null> {
     const index = this.sessions.findIndex(
-      (session) => session.id === input.sessionId && session.status === "active"
+      (session) => session.id === input.sessionId && session.status === "reporting"
     );
 
     if (index === -1) {
       return null;
     }
 
-    const existing = this.sessions[index];
+    const existing = this.sessions[index]!;
 
     if (!existing) {
       return null;
     }
 
-    const closed: IncidentSession = {
+    const awaitingStewards: IncidentSession = {
       ...existing,
       endedByUserId: input.endedByUserId,
-      status: "closed",
+      status: "awaiting_stewards",
       endedAt: this.now++
     };
 
-    this.sessions[index] = closed;
-    return closed;
+    this.sessions[index] = awaitingStewards;
+    return awaitingStewards;
   }
 
   async insertReport(input: InsertReportInput): Promise<InsertReportResult> {
@@ -805,16 +1449,354 @@ class MemoryIncidentRepository implements IncidentRepository {
       );
   }
 
-  async getLatestClosedSessionForGuild(
+  async getLatestSessionAwaitingStewardsForGuild(
     guildId: string
   ): Promise<IncidentSession | null> {
     return (
       this.sessions
         .filter(
-          (session) => session.guildId === guildId && session.status === "closed"
+          (session) =>
+            session.guildId === guildId && session.status === "awaiting_stewards"
         )
         .sort((left, right) => (right.endedAt ?? 0) - (left.endedAt ?? 0))[0] ??
       null
     );
+  }
+
+  async getStewardingSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions.find(
+        (session) => session.guildId === guildId && session.status === "stewarding"
+      ) ?? null
+    );
+  }
+
+  async getStewardingSessionForChannel(
+    guildId: string,
+    channelId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions.find(
+        (session) =>
+          session.guildId === guildId &&
+          session.channelId === channelId &&
+          session.status === "stewarding"
+      ) ?? null
+    );
+  }
+
+  async startStewardingSession(
+    input: StartStewardingSessionInput
+  ): Promise<IncidentSession | null> {
+    return this.updateSession(input.sessionId, "awaiting_stewards", {
+      status: "stewarding",
+      stewardingStartedByUserId: input.startedByUserId,
+      stewardingStartedAt: this.now++
+    });
+  }
+
+  async completeStewardingSession(
+    input: CompleteStewardingSessionInput
+  ): Promise<IncidentSession | null> {
+    return this.updateSession(input.sessionId, "stewarding", {
+      status: "decided",
+      stewardingCompletedByUserId: input.completedByUserId,
+      stewardingCompletedAt: this.now++
+    });
+  }
+
+  async reopenAwaitingStewardsSessionForReporting(
+    input: ReopenAwaitingStewardsSessionForReportingInput
+  ): Promise<ReopenAwaitingStewardsSessionForReportingResult> {
+    const latest = this.getLatestSessionForGuild(input.guildId);
+
+    if (!latest || latest.status !== "awaiting_stewards") {
+      return latest?.status === "stewarding"
+        ? { status: "stewarding_started", session: latest }
+        : { status: "no_awaiting_stewards", session: latest ?? undefined };
+    }
+
+    const session = await this.updateSession(latest.id, "awaiting_stewards", {
+      endedByUserId: null,
+      endedAt: null,
+      status: "reporting",
+      lastReopenedByUserId: input.reopenedByUserId,
+      lastReopenedAt: this.now++
+    });
+
+    return session
+      ? { status: "reopened", session }
+      : { status: "no_awaiting_stewards" };
+  }
+
+  async reopenDecidedSessionForStewarding(
+    input: ReopenDecidedSessionForStewardingInput
+  ): Promise<ReopenDecidedSessionForStewardingResult> {
+    const stewarding = await this.getStewardingSessionForGuild(input.guildId);
+
+    if (stewarding) {
+      return { status: "already_stewarding", session: stewarding };
+    }
+
+    const latest = this.getLatestSessionForGuild(input.guildId);
+
+    if (!latest || latest.status !== "decided") {
+      return { status: "no_decided_session", session: latest ?? undefined };
+    }
+
+    const session = await this.updateSession(latest.id, "decided", {
+      status: "stewarding",
+      stewardingCompletedByUserId: null,
+      stewardingCompletedAt: null,
+      lastReopenedByUserId: input.reopenedByUserId,
+      lastReopenedAt: this.now++
+    });
+
+    return session
+      ? { status: "reopened", session }
+      : { status: "no_decided_session" };
+  }
+
+  async getLatestIncidentSummarySessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions
+        .filter((session) => session.guildId === guildId && session.status !== "reporting")
+        .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null
+    );
+  }
+
+  async getLatestDecidedSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions
+        .filter((session) => session.guildId === guildId && session.status === "decided")
+        .sort(
+          (left, right) =>
+            (right.stewardingCompletedAt ?? 0) - (left.stewardingCompletedAt ?? 0)
+        )[0] ?? null
+    );
+  }
+
+  async createPenaltyPreset(
+    input: CreatePenaltyPresetInput
+  ): Promise<PenaltyPreset> {
+    const timestamp = this.now++;
+    const preset: PenaltyPreset = {
+      id: `preset-${this.idNumber++}`,
+      guildId: input.guildId,
+      name: input.name,
+      outcome: input.outcome,
+      delta: input.delta,
+      isActive: true,
+      createdByUserId: input.createdByUserId,
+      deactivatedByUserId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deactivatedAt: null
+    };
+
+    this.penaltyPresets.push(preset);
+    return preset;
+  }
+
+  async listPenaltyPresetsForGuild(guildId: string): Promise<PenaltyPreset[]> {
+    return this.penaltyPresets
+      .filter((preset) => preset.guildId === guildId && preset.isActive)
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  async searchPenaltyPresetsForGuild(
+    guildId: string,
+    query: string
+  ): Promise<PenaltyPreset[]> {
+    const normalized = query.trim().toLocaleLowerCase();
+
+    return (await this.listPenaltyPresetsForGuild(guildId))
+      .filter((preset) => preset.name.toLocaleLowerCase().includes(normalized))
+      .slice(0, 25);
+  }
+
+  async getActivePenaltyPresetForGuild(
+    guildId: string,
+    presetIdOrName: string
+  ): Promise<PenaltyPreset | null> {
+    return (
+      this.penaltyPresets.find(
+        (preset) =>
+          preset.guildId === guildId &&
+          preset.isActive &&
+          (preset.id === presetIdOrName || preset.name === presetIdOrName)
+      ) ?? null
+    );
+  }
+
+  async deactivatePenaltyPreset(
+    input: DeactivatePenaltyPresetInput
+  ): Promise<PenaltyPreset | null> {
+    const index = this.penaltyPresets.findIndex(
+      (preset) => preset.id === input.presetId && preset.isActive
+    );
+
+    if (index === -1) {
+      return null;
+    }
+
+    const existing = this.penaltyPresets[index]!;
+    const timestamp = this.now++;
+    const deactivated = {
+      ...existing,
+      isActive: false,
+      deactivatedByUserId: input.deactivatedByUserId,
+      updatedAt: timestamp,
+      deactivatedAt: timestamp
+    };
+
+    this.penaltyPresets[index] = deactivated;
+    return deactivated;
+  }
+
+  async upsertPenaltyForIncidentSession(
+    input: UpsertPenaltyInput
+  ): Promise<UpsertPenaltyResult> {
+    const existingIndex = this.penalties.findIndex(
+      (penalty) =>
+        penalty.incidentSessionId === input.incidentSessionId &&
+        penalty.incidentReportId === input.incidentReportId &&
+        penalty.affectedUserId === input.affectedUserId
+    );
+    const timestamp = this.now++;
+
+    if (existingIndex !== -1) {
+      const existing = this.penalties[existingIndex]!;
+      const penalty = {
+        ...existing,
+        penaltyPresetId: input.penaltyPresetId,
+        outcome: input.outcome,
+        delta: input.delta,
+        note: input.note,
+        updatedByUserId: input.updatedByUserId,
+        updatedAt: timestamp
+      };
+
+      this.penalties[existingIndex] = penalty;
+      return { status: "updated", penalty };
+    }
+
+    const penalty: Penalty = {
+      id: `penalty-${this.idNumber++}`,
+      incidentSessionId: input.incidentSessionId,
+      incidentReportId: input.incidentReportId,
+      affectedUserId: input.affectedUserId,
+      penaltyPresetId: input.penaltyPresetId,
+      outcome: input.outcome,
+      delta: input.delta,
+      note: input.note,
+      createdByUserId: input.createdByUserId,
+      updatedByUserId: input.updatedByUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+
+    this.penalties.push(penalty);
+    return { status: "inserted", penalty };
+  }
+
+  async clearPenaltiesForIncidentInSession(
+    input: ClearPenaltiesForIncidentInput
+  ): Promise<number> {
+    const before = this.penalties.length;
+    const remaining = this.penalties.filter(
+      (penalty) =>
+        penalty.incidentSessionId !== input.incidentSessionId ||
+        penalty.incidentReportId !== input.incidentReportId
+    );
+
+    this.penalties.splice(0, this.penalties.length, ...remaining);
+    return before - remaining.length;
+  }
+
+  async getPenaltiesWithReportsForSession(
+    sessionId: string
+  ): Promise<PenaltyDecisionSummaryRow[]> {
+    return this.penalties
+      .filter((penalty) => penalty.incidentSessionId === sessionId)
+      .map((penalty) => ({
+        penalty,
+        report: this.reports.find((report) => report.id === penalty.incidentReportId)!,
+        preset:
+          this.penaltyPresets.find(
+            (preset) => preset.id === penalty.penaltyPresetId
+          ) ?? null
+      }))
+      .filter((row) => row.report)
+      .sort(
+        (left, right) =>
+          left.report.raceNumber - right.report.raceNumber ||
+          left.report.lapNumber - right.report.lapNumber ||
+          left.report.turnNumber - right.report.turnNumber ||
+          left.report.createdAt - right.report.createdAt ||
+          left.penalty.createdAt - right.penalty.createdAt
+      );
+  }
+
+  async getReportForStewardingSessionByDiscordInteractionId(
+    incidentSessionId: string,
+    guildId: string,
+    discordInteractionId: string
+  ): Promise<IncidentReport | null> {
+    const session = this.sessions.find(
+      (candidate) =>
+        candidate.id === incidentSessionId &&
+        candidate.guildId === guildId &&
+        candidate.status === "stewarding"
+    );
+
+    if (!session) {
+      return null;
+    }
+
+    return (
+      this.reports.find(
+        (report) =>
+          report.sessionId === incidentSessionId &&
+          report.guildId === guildId &&
+          report.discordInteractionId === discordInteractionId
+      ) ?? null
+    );
+  }
+
+  private getLatestSessionForGuild(guildId: string): IncidentSession | null {
+    return (
+      this.sessions
+        .filter((session) => session.guildId === guildId)
+        .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null
+    );
+  }
+
+  private updateSession(
+    sessionId: string,
+    expectedStatus: IncidentSession["status"],
+    updates: Partial<IncidentSession>
+  ): IncidentSession | null {
+    const index = this.sessions.findIndex(
+      (session) => session.id === sessionId && session.status === expectedStatus
+    );
+
+    if (index === -1) {
+      return null;
+    }
+
+    const updated = {
+      ...this.sessions[index]!,
+      ...updates
+    };
+
+    this.sessions[index] = updated;
+    return updated;
   }
 }

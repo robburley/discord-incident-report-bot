@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { hasManagerRole } from "../../src/core/authorization";
+import { hasIncidentManagerPermission } from "../../src/core/authorization";
 import {
   configureGuildManagerRole,
   getGuildConfigStatus
@@ -10,9 +10,20 @@ import {
   validateIncidentReportFields
 } from "../../src/core/incidents";
 import {
+  addPenaltyPreset,
+  applyPenalty,
+  clearPenaltyForIncident,
+  completeStewarding,
   endIncidentSession,
-  getLatestClosedSessionSummary,
-  startIncidentSession
+  getLatestDecisionSummary,
+  getLatestIncidentSessionSummary,
+  listPenaltyPresets,
+  removePenaltyPreset,
+  reopenReporting,
+  reopenStewarding,
+  searchPenaltyPresets,
+  startIncidentSession,
+  startStewarding
 } from "../../src/core/sessions";
 import {
   formatSessionSummary,
@@ -20,8 +31,12 @@ import {
 } from "../../src/core/summary";
 import { RepositoryConflictError } from "../../src/db/repository";
 import type {
-  CloseSessionInput,
-  CreateSessionInput,
+  EndReportingSessionInput,
+  ClearPenaltiesForIncidentInput,
+  CompleteStewardingSessionInput,
+  CreatePenaltyPresetInput,
+  CreateReportingSessionInput,
+  DeactivatePenaltyPresetInput,
   DuplicateReportInput,
   GuildConfig,
   IncidentReport,
@@ -29,6 +44,16 @@ import type {
   IncidentSession,
   InsertReportInput,
   InsertReportResult,
+  Penalty,
+  PenaltyDecisionSummaryRow,
+  PenaltyPreset,
+  ReopenAwaitingStewardsSessionForReportingInput,
+  ReopenAwaitingStewardsSessionForReportingResult,
+  ReopenDecidedSessionForStewardingInput,
+  ReopenDecidedSessionForStewardingResult,
+  StartStewardingSessionInput,
+  UpsertPenaltyInput,
+  UpsertPenaltyResult,
   UpsertGuildConfigInput
 } from "../../src/db/repository";
 
@@ -99,21 +124,29 @@ describe("core business logic", () => {
 
   it("authorizes members by configured manager role", () => {
     expect(
-      hasManagerRole({
+      hasIncidentManagerPermission({
         managerRoleId: "manager-role",
         memberRoleIds: ["driver-role", "manager-role"]
       })
     ).toBe(true);
 
     expect(
-      hasManagerRole({
+      hasIncidentManagerPermission({
+        managerRoleId: "manager-role",
+        memberRoleIds: ["driver-role"],
+        canManageGuild: true
+      })
+    ).toBe(true);
+
+    expect(
+      hasIncidentManagerPermission({
         managerRoleId: "manager-role",
         memberRoleIds: ["driver-role"]
       })
     ).toBe(false);
   });
 
-  it("starts and prevents a second active session", async () => {
+  it("starts and prevents a second reporting session", async () => {
     await seedConfig(repository);
 
     const started = await startIncidentSession({
@@ -132,10 +165,10 @@ describe("core business logic", () => {
     });
 
     expect(started.status).toBe("started");
-    expect(duplicate.status).toBe("active_session_exists");
+    expect(duplicate.status).toBe("previous_session_not_decided");
   });
 
-  it("scopes active session checks by guild", async () => {
+  it("scopes reporting session checks by guild", async () => {
     await seedConfig(repository, "guild-a", "manager-role-a");
     await seedConfig(repository, "guild-b", "manager-role-b");
 
@@ -163,12 +196,12 @@ describe("core business logic", () => {
 
     expect(first.status).toBe("started");
     expect(second.status).toBe("started");
-    expect(duplicate.status).toBe("active_session_exists");
-    await expect(repository.getActiveSession("guild-a")).resolves.toMatchObject({
+    expect(duplicate.status).toBe("previous_session_not_decided");
+    await expect(repository.getReportingSessionForGuild("guild-a")).resolves.toMatchObject({
       guildId: "guild-a",
       channelId: "shared-channel"
     });
-    await expect(repository.getActiveSession("guild-b")).resolves.toMatchObject({
+    await expect(repository.getReportingSessionForGuild("guild-b")).resolves.toMatchObject({
       guildId: "guild-b",
       channelId: "shared-channel"
     });
@@ -195,9 +228,24 @@ describe("core business logic", () => {
     expect(end.status).toBe("unauthorized");
   });
 
+  it("allows server admins to perform manager session actions", async () => {
+    await seedConfig(repository);
+
+    const start = await startIncidentSession({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "admin-1",
+      memberRoleIds: ["driver-role"],
+      canManageGuild: true
+    });
+
+    expect(start.status).toBe("started");
+  });
+
   it("ends a session and produces an empty public summary", async () => {
     await seedConfig(repository);
-    await seedActiveSession(repository);
+    await seedReportingSession(repository);
 
     const result = await endIncidentSession({
       repository,
@@ -256,9 +304,9 @@ describe("core business logic", () => {
     ).toBe("invalid");
   });
 
-  it("creates incident reports only for an active session channel", async () => {
+  it("creates incident reports only for a reporting session channel", async () => {
     await seedConfig(repository);
-    const session = await seedActiveSession(repository);
+    const session = await seedReportingSession(repository);
 
     const wrongChannel = await createIncidentReport({
       repository,
@@ -289,8 +337,8 @@ describe("core business logic", () => {
 
   it("rejects modal submissions after a session closes", async () => {
     await seedConfig(repository);
-    const session = await seedActiveSession(repository);
-    await repository.closeSession({
+    const session = await seedReportingSession(repository);
+    await repository.endReportingSession({
       sessionId: session.id,
       endedByUserId: "manager-1"
     });
@@ -307,12 +355,12 @@ describe("core business logic", () => {
       carNumber: "07"
     });
 
-    expect(result.status).toBe("no_active_session");
+    expect(result.status).toBe("no_reporting_session");
   });
 
   it("keeps duplicate modal interaction IDs idempotent", async () => {
     await seedConfig(repository);
-    await seedActiveSession(repository);
+    await seedReportingSession(repository);
 
     const input = {
       repository,
@@ -335,7 +383,7 @@ describe("core business logic", () => {
 
   it("rejects exact duplicate reports from the same user", async () => {
     await seedConfig(repository);
-    await seedActiveSession(repository);
+    await seedReportingSession(repository);
 
     await createIncidentReport({
       repository,
@@ -366,7 +414,7 @@ describe("core business logic", () => {
 
   it("formats sorted summaries and splits messages under the Discord limit", async () => {
     await seedConfig(repository);
-    const session = await seedActiveSession(repository);
+    const session = await seedReportingSession(repository);
 
     await repository.insertReport(reportInput(session, "interaction-1", 2, 1, 1, "99"));
     await repository.insertReport(reportInput(session, "interaction-2", 1, 1, 3, "12A"));
@@ -392,21 +440,29 @@ describe("core business logic", () => {
     ]);
   });
 
-  it("rebuilds the latest closed session summary", async () => {
+  it("rebuilds the latest incident report summary", async () => {
     await seedConfig(repository);
-    const first = await seedActiveSession(repository, "channel-1");
-    await repository.closeSession({
+    const first = await seedReportingSession(repository, "channel-1");
+    await repository.endReportingSession({
       sessionId: first.id,
       endedByUserId: "manager-1"
     });
-    const second = await seedActiveSession(repository, "channel-2");
+    await repository.startStewardingSession({
+      sessionId: first.id,
+      startedByUserId: "manager-1"
+    });
+    await repository.completeStewardingSession({
+      sessionId: first.id,
+      completedByUserId: "manager-1"
+    });
+    const second = await seedReportingSession(repository, "channel-2");
     await repository.insertReport(reportInput(second, "interaction-1", 1, 1, 1, "07"));
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: second.id,
       endedByUserId: "manager-1"
     });
 
-    const result = await getLatestClosedSessionSummary({
+    const result = await getLatestIncidentSessionSummary({
       repository,
       guildId: "guild-1",
       userId: "manager-1",
@@ -420,41 +476,49 @@ describe("core business logic", () => {
     );
   });
 
-  it("rebuilds summaries from only the invoking guild's latest closed session", async () => {
+  it("rebuilds summaries from only the invoking guild's latest incident report session", async () => {
     await seedConfig(repository, "guild-a", "manager-role-a");
     await seedConfig(repository, "guild-b", "manager-role-b");
-    const guildAOld = await seedActiveSession(repository, "channel-a-old", "guild-a");
+    const guildAOld = await seedReportingSession(repository, "channel-a-old", "guild-a");
     await repository.insertReport(
       reportInput(guildAOld, "guild-a-old-report", 1, 1, 1, "11")
     );
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildAOld.id,
       endedByUserId: "manager-a"
     });
-    const guildBSession = await seedActiveSession(repository, "channel-b", "guild-b");
+    await repository.startStewardingSession({
+      sessionId: guildAOld.id,
+      startedByUserId: "manager-a"
+    });
+    await repository.completeStewardingSession({
+      sessionId: guildAOld.id,
+      completedByUserId: "manager-a"
+    });
+    const guildBSession = await seedReportingSession(repository, "channel-b", "guild-b");
     await repository.insertReport(
       reportInput(guildBSession, "guild-b-report", 2, 1, 1, "22")
     );
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildBSession.id,
       endedByUserId: "manager-b"
     });
-    const guildANew = await seedActiveSession(repository, "channel-a-new", "guild-a");
+    const guildANew = await seedReportingSession(repository, "channel-a-new", "guild-a");
     await repository.insertReport(
       reportInput(guildANew, "guild-a-new-report", 3, 1, 1, "33")
     );
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildANew.id,
       endedByUserId: "manager-a"
     });
 
-    const guildAResult = await getLatestClosedSessionSummary({
+    const guildAResult = await getLatestIncidentSessionSummary({
       repository,
       guildId: "guild-a",
       userId: "manager-a",
       memberRoleIds: ["manager-role-a"]
     });
-    const guildBResult = await getLatestClosedSessionSummary({
+    const guildBResult = await getLatestIncidentSessionSummary({
       repository,
       guildId: "guild-b",
       userId: "manager-b",
@@ -486,12 +550,12 @@ describe("core business logic", () => {
   it("keeps reports from one guild out of another guild's summary", async () => {
     await seedConfig(repository, "guild-a", "manager-role");
     await seedConfig(repository, "guild-b", "manager-role");
-    const guildASession = await seedActiveSession(
+    const guildASession = await seedReportingSession(
       repository,
       "shared-channel",
       "guild-a"
     );
-    const guildBSession = await seedActiveSession(
+    const guildBSession = await seedReportingSession(
       repository,
       "shared-channel",
       "guild-b"
@@ -519,16 +583,16 @@ describe("core business logic", () => {
       turnNumber: "1",
       carNumber: "99"
     });
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildASession.id,
       endedByUserId: "manager-a"
     });
-    await repository.closeSession({
+    await repository.endReportingSession({
       sessionId: guildBSession.id,
       endedByUserId: "manager-b"
     });
 
-    const guildAResult = await getLatestClosedSessionSummary({
+    const guildAResult = await getLatestIncidentSessionSummary({
       repository,
       guildId: "guild-a",
       userId: "manager-a",
@@ -542,6 +606,419 @@ describe("core business logic", () => {
     expect(
       guildAResult.status === "found" ? guildAResult.summaryMessages[0] : ""
     ).not.toContain("guild-b-interaction");
+  });
+
+  it("moves sessions through reporting, stewarding, decided, and reopen transitions", async () => {
+    await seedConfig(repository);
+    const started = await startIncidentSession({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(started.status).toBe("started");
+
+    const ended = await endIncidentSession({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(ended.status).toBe("ended");
+    expect(ended.status === "ended" ? ended.session.status : "").toBe(
+      "awaiting_stewards"
+    );
+
+    const duplicate = await startIncidentSession({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-2",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const reopenedReporting = await reopenReporting({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(duplicate.status).toBe("previous_session_not_decided");
+    expect(reopenedReporting.status).toBe("reopened");
+    expect(
+      reopenedReporting.status === "reopened"
+        ? reopenedReporting.session.status
+        : ""
+    ).toBe("reporting");
+
+    await endIncidentSession({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const stewarding = await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const cannotReopenReporting = await reopenReporting({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const completed = await completeStewarding({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(stewarding.status).toBe("started");
+    expect(stewarding.status === "started" ? stewarding.session.status : "").toBe(
+      "stewarding"
+    );
+    expect(cannotReopenReporting.status).toBe("stewarding_started");
+    expect(completed.status).toBe("completed");
+    expect(completed.status === "completed" ? completed.session.status : "").toBe(
+      "decided"
+    );
+    expect(
+      completed.status === "completed" ? completed.summaryMessages[0] : ""
+    ).toContain("No penalties were assigned.");
+
+    const reopenedStewarding = await reopenStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(reopenedStewarding.status).toBe("reopened");
+    expect(
+      reopenedStewarding.status === "reopened"
+        ? reopenedStewarding.session.status
+        : ""
+    ).toBe("stewarding");
+  });
+
+  it("starts stewarding only for awaiting sessions and rejects concurrent stewarding", async () => {
+    await seedConfig(repository);
+
+    const noAwaiting = await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    await seedReportingSession(repository, "channel-1");
+    await endIncidentSession({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const first = await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const second = await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(noAwaiting.status).toBe("no_awaiting_stewards");
+    expect(first.status).toBe("started");
+    expect(second.status).toBe("already_stewarding");
+  });
+
+  it("configures, lists, searches, and removes penalty presets", async () => {
+    await seedConfig(repository);
+
+    const invalidName = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: " ",
+      outcome: "Warning"
+    });
+    const warning = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: " Warning ",
+      outcome: " Warning `outcome`\nwith spacing ",
+      delta: 0
+    });
+    const invalidOutcome = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Too Long",
+      outcome: "x".repeat(201)
+    });
+    const duplicate = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Warning",
+      outcome: "Another warning"
+    });
+    await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Drive Through",
+      outcome: "Drive-through penalty",
+      delta: 1
+    });
+
+    const listed = await listPenaltyPresets({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const searched = await searchPenaltyPresets({
+      repository,
+      guildId: "guild-1",
+      query: "war"
+    });
+    const removed = await removePenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      penaltyPreset: warning.status === "added" ? warning.preset.id : "missing"
+    });
+    const searchedAfterRemove = await searchPenaltyPresets({
+      repository,
+      guildId: "guild-1",
+      query: "war"
+    });
+
+    expect(invalidName.status).toBe("invalid_name");
+    expect(warning.status).toBe("added");
+    expect(warning.status === "added" ? warning.preset.name : "").toBe("Warning");
+    expect(warning.status === "added" ? warning.preset.outcome : "").toBe(
+      "Warning 'outcome' with spacing"
+    );
+    expect(invalidOutcome.status).toBe("invalid_outcome");
+    expect(duplicate.status).toBe("duplicate_preset");
+    expect(listed.status).toBe("found");
+    expect(listed.status === "found" ? listed.presets : []).toHaveLength(2);
+    expect(searched.status).toBe("found");
+    expect(searched.status === "found" ? searched.presets : []).toHaveLength(1);
+    expect(removed.status).toBe("removed");
+    expect(searchedAfterRemove.status).toBe("found");
+    expect(
+      searchedAfterRemove.status === "found" ? searchedAfterRemove.presets : []
+    ).toHaveLength(0);
+  });
+
+  it("records, updates, and clears penalties for stewarding incidents", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.insertReport(reportInput(session, "incident-1", 1, 2, 3, "07"));
+    await endIncidentSession({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const warning = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Warning",
+      outcome: "Warning",
+      delta: 0
+    });
+    const points = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Points",
+      outcome: "5 points",
+      delta: 5
+    });
+
+    const missingUser = await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: " ",
+      penaltyPreset: "Warning"
+    });
+    const wrongChannel = await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-2",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: "driver-1",
+      penaltyPreset: "Warning"
+    });
+    const recorded = await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: "driver-1",
+      penaltyPreset: warning.status === "added" ? warning.preset.id : "missing",
+      note: " avoid line breaks \n please "
+    });
+    const updated = await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: "driver-1",
+      penaltyPreset: points.status === "added" ? points.preset.id : "missing"
+    });
+    const secondDriver = await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: "driver-2",
+      penaltyPreset: "Points"
+    });
+
+    expect(repository.penalties).toHaveLength(2);
+
+    const cleared = await clearPenaltyForIncident({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1"
+    });
+    const clearedAgain = await clearPenaltyForIncident({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1"
+    });
+
+    expect(missingUser.status).toBe("missing_affected_user");
+    expect(wrongChannel.status).toBe("no_stewarding_session");
+    expect(recorded.status).toBe("recorded");
+    expect(recorded.status === "recorded" ? recorded.note : "").toBe(
+      "avoid line breaks please"
+    );
+    expect(updated.status).toBe("updated");
+    expect(updated.status === "updated" ? updated.outcome : "").toBe("5 points");
+    expect(secondDriver.status).toBe("recorded");
+    expect(cleared.status).toBe("cleared");
+    expect(cleared.status === "cleared" ? cleared.clearedCount : 0).toBe(2);
+    expect(clearedAgain.status).toBe("none_found");
+  });
+
+  it("builds stewarding decision summaries from denormalized outcomes", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.insertReport(reportInput(session, "incident-1", 1, 1, 1, "07"));
+    await endIncidentSession({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const preset = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Unsafe",
+      outcome: "Unsafe `rejoin`\nplus warning",
+      delta: 1
+    });
+    await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: "driver-1",
+      penaltyPreset: preset.status === "added" ? preset.preset.id : "missing"
+    });
+    await removePenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      penaltyPreset: preset.status === "added" ? preset.preset.id : "missing"
+    });
+
+    const completed = await completeStewarding({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const decisionSummary = await getLatestDecisionSummary({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(completed.status).toBe("completed");
+    expect(decisionSummary.status).toBe("found");
+    expect(
+      decisionSummary.status === "found" ? decisionSummary.summaryMessages[0] : ""
+    ).toContain("Unsafe 'rejoin' plus warning");
+    expect(
+      decisionSummary.status === "found" ? decisionSummary.summaryMessages[0] : ""
+    ).toContain("<@driver-1>");
   });
 
   it("leaves an unconfigured guild blocked while another guild is configured", async () => {
@@ -590,12 +1067,12 @@ async function seedConfig(
   });
 }
 
-async function seedActiveSession(
+async function seedReportingSession(
   repository: MemoryIncidentRepository,
   channelId = "channel-1",
   guildId = "guild-1"
 ): Promise<IncidentSession> {
-  return repository.createSession({
+  return repository.createReportingSession({
     guildId,
     channelId,
     startedByUserId: "manager-1"
@@ -626,6 +1103,8 @@ class MemoryIncidentRepository implements IncidentRepository {
   readonly configs = new Map<string, GuildConfig>();
   readonly sessions: IncidentSession[] = [];
   readonly reports: IncidentReport[] = [];
+  readonly penaltyPresets: PenaltyPreset[] = [];
+  readonly penalties: Penalty[] = [];
   private now = 1_000;
   private idNumber = 1;
 
@@ -647,19 +1126,21 @@ class MemoryIncidentRepository implements IncidentRepository {
     return this.configs.get(guildId) ?? null;
   }
 
-  async getActiveSession(guildId: string): Promise<IncidentSession | null> {
+  async getReportingSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
     return (
       this.sessions.find(
-        (session) => session.guildId === guildId && session.status === "active"
+        (session) => session.guildId === guildId && session.status === "reporting"
       ) ?? null
     );
   }
 
-  async createSession(input: CreateSessionInput): Promise<IncidentSession> {
-    const active = await this.getActiveSession(input.guildId);
+  async createReportingSession(input: CreateReportingSessionInput): Promise<IncidentSession> {
+    const latest = this.getLatestSessionForGuild(input.guildId);
 
-    if (active) {
-      throw new RepositoryConflictError("Active session exists.");
+    if (latest && latest.status !== "decided") {
+      throw new RepositoryConflictError("Latest session is not decided.");
     }
 
     const session: IncidentSession = {
@@ -668,39 +1149,47 @@ class MemoryIncidentRepository implements IncidentRepository {
       channelId: input.channelId,
       startedByUserId: input.startedByUserId,
       endedByUserId: null,
-      status: "active",
+      status: "reporting",
       startedAt: this.now++,
-      endedAt: null
+      endedAt: null,
+      stewardingStartedByUserId: null,
+      stewardingCompletedByUserId: null,
+      lastReopenedByUserId: null,
+      stewardingStartedAt: null,
+      stewardingCompletedAt: null,
+      lastReopenedAt: null
     };
 
     this.sessions.push(session);
     return session;
   }
 
-  async closeSession(input: CloseSessionInput): Promise<IncidentSession | null> {
+  async endReportingSession(
+    input: EndReportingSessionInput
+  ): Promise<IncidentSession | null> {
     const index = this.sessions.findIndex(
-      (session) => session.id === input.sessionId && session.status === "active"
+      (session) => session.id === input.sessionId && session.status === "reporting"
     );
 
     if (index === -1) {
       return null;
     }
 
-    const existing = this.sessions[index];
+    const existing = this.sessions[index]!;
 
     if (!existing) {
       return null;
     }
 
-    const closed: IncidentSession = {
+    const awaitingStewards: IncidentSession = {
       ...existing,
       endedByUserId: input.endedByUserId,
-      status: "closed",
+      status: "awaiting_stewards",
       endedAt: this.now++
     };
 
-    this.sessions[index] = closed;
-    return closed;
+    this.sessions[index] = awaitingStewards;
+    return awaitingStewards;
   }
 
   async insertReport(input: InsertReportInput): Promise<InsertReportResult> {
@@ -766,16 +1255,354 @@ class MemoryIncidentRepository implements IncidentRepository {
       );
   }
 
-  async getLatestClosedSessionForGuild(
+  async getLatestSessionAwaitingStewardsForGuild(
     guildId: string
   ): Promise<IncidentSession | null> {
     return (
       this.sessions
         .filter(
-          (session) => session.guildId === guildId && session.status === "closed"
+          (session) =>
+            session.guildId === guildId && session.status === "awaiting_stewards"
         )
         .sort((left, right) => (right.endedAt ?? 0) - (left.endedAt ?? 0))[0] ??
       null
     );
+  }
+
+  async getStewardingSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions.find(
+        (session) => session.guildId === guildId && session.status === "stewarding"
+      ) ?? null
+    );
+  }
+
+  async getStewardingSessionForChannel(
+    guildId: string,
+    channelId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions.find(
+        (session) =>
+          session.guildId === guildId &&
+          session.channelId === channelId &&
+          session.status === "stewarding"
+      ) ?? null
+    );
+  }
+
+  async startStewardingSession(
+    input: StartStewardingSessionInput
+  ): Promise<IncidentSession | null> {
+    return this.updateSession(input.sessionId, "awaiting_stewards", {
+      status: "stewarding",
+      stewardingStartedByUserId: input.startedByUserId,
+      stewardingStartedAt: this.now++
+    });
+  }
+
+  async completeStewardingSession(
+    input: CompleteStewardingSessionInput
+  ): Promise<IncidentSession | null> {
+    return this.updateSession(input.sessionId, "stewarding", {
+      status: "decided",
+      stewardingCompletedByUserId: input.completedByUserId,
+      stewardingCompletedAt: this.now++
+    });
+  }
+
+  async reopenAwaitingStewardsSessionForReporting(
+    input: ReopenAwaitingStewardsSessionForReportingInput
+  ): Promise<ReopenAwaitingStewardsSessionForReportingResult> {
+    const latest = this.getLatestSessionForGuild(input.guildId);
+
+    if (!latest || latest.status !== "awaiting_stewards") {
+      return latest?.status === "stewarding"
+        ? { status: "stewarding_started", session: latest }
+        : { status: "no_awaiting_stewards", session: latest ?? undefined };
+    }
+
+    const session = await this.updateSession(latest.id, "awaiting_stewards", {
+      endedByUserId: null,
+      endedAt: null,
+      status: "reporting",
+      lastReopenedByUserId: input.reopenedByUserId,
+      lastReopenedAt: this.now++
+    });
+
+    return session
+      ? { status: "reopened", session }
+      : { status: "no_awaiting_stewards" };
+  }
+
+  async reopenDecidedSessionForStewarding(
+    input: ReopenDecidedSessionForStewardingInput
+  ): Promise<ReopenDecidedSessionForStewardingResult> {
+    const stewarding = await this.getStewardingSessionForGuild(input.guildId);
+
+    if (stewarding) {
+      return { status: "already_stewarding", session: stewarding };
+    }
+
+    const latest = this.getLatestSessionForGuild(input.guildId);
+
+    if (!latest || latest.status !== "decided") {
+      return { status: "no_decided_session", session: latest ?? undefined };
+    }
+
+    const session = await this.updateSession(latest.id, "decided", {
+      status: "stewarding",
+      stewardingCompletedByUserId: null,
+      stewardingCompletedAt: null,
+      lastReopenedByUserId: input.reopenedByUserId,
+      lastReopenedAt: this.now++
+    });
+
+    return session
+      ? { status: "reopened", session }
+      : { status: "no_decided_session" };
+  }
+
+  async getLatestIncidentSummarySessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions
+        .filter((session) => session.guildId === guildId && session.status !== "reporting")
+        .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null
+    );
+  }
+
+  async getLatestDecidedSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    return (
+      this.sessions
+        .filter((session) => session.guildId === guildId && session.status === "decided")
+        .sort(
+          (left, right) =>
+            (right.stewardingCompletedAt ?? 0) - (left.stewardingCompletedAt ?? 0)
+        )[0] ?? null
+    );
+  }
+
+  async createPenaltyPreset(
+    input: CreatePenaltyPresetInput
+  ): Promise<PenaltyPreset> {
+    const timestamp = this.now++;
+    const preset: PenaltyPreset = {
+      id: `preset-${this.idNumber++}`,
+      guildId: input.guildId,
+      name: input.name,
+      outcome: input.outcome,
+      delta: input.delta,
+      isActive: true,
+      createdByUserId: input.createdByUserId,
+      deactivatedByUserId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deactivatedAt: null
+    };
+
+    this.penaltyPresets.push(preset);
+    return preset;
+  }
+
+  async listPenaltyPresetsForGuild(guildId: string): Promise<PenaltyPreset[]> {
+    return this.penaltyPresets
+      .filter((preset) => preset.guildId === guildId && preset.isActive)
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  async searchPenaltyPresetsForGuild(
+    guildId: string,
+    query: string
+  ): Promise<PenaltyPreset[]> {
+    const normalized = query.trim().toLocaleLowerCase();
+
+    return (await this.listPenaltyPresetsForGuild(guildId))
+      .filter((preset) => preset.name.toLocaleLowerCase().includes(normalized))
+      .slice(0, 25);
+  }
+
+  async getActivePenaltyPresetForGuild(
+    guildId: string,
+    presetIdOrName: string
+  ): Promise<PenaltyPreset | null> {
+    return (
+      this.penaltyPresets.find(
+        (preset) =>
+          preset.guildId === guildId &&
+          preset.isActive &&
+          (preset.id === presetIdOrName || preset.name === presetIdOrName)
+      ) ?? null
+    );
+  }
+
+  async deactivatePenaltyPreset(
+    input: DeactivatePenaltyPresetInput
+  ): Promise<PenaltyPreset | null> {
+    const index = this.penaltyPresets.findIndex(
+      (preset) => preset.id === input.presetId && preset.isActive
+    );
+
+    if (index === -1) {
+      return null;
+    }
+
+    const existing = this.penaltyPresets[index]!;
+    const timestamp = this.now++;
+    const deactivated = {
+      ...existing,
+      isActive: false,
+      deactivatedByUserId: input.deactivatedByUserId,
+      updatedAt: timestamp,
+      deactivatedAt: timestamp
+    };
+
+    this.penaltyPresets[index] = deactivated;
+    return deactivated;
+  }
+
+  async upsertPenaltyForIncidentSession(
+    input: UpsertPenaltyInput
+  ): Promise<UpsertPenaltyResult> {
+    const existingIndex = this.penalties.findIndex(
+      (penalty) =>
+        penalty.incidentSessionId === input.incidentSessionId &&
+        penalty.incidentReportId === input.incidentReportId &&
+        penalty.affectedUserId === input.affectedUserId
+    );
+    const timestamp = this.now++;
+
+    if (existingIndex !== -1) {
+      const existing = this.penalties[existingIndex]!;
+      const penalty = {
+        ...existing,
+        penaltyPresetId: input.penaltyPresetId,
+        outcome: input.outcome,
+        delta: input.delta,
+        note: input.note,
+        updatedByUserId: input.updatedByUserId,
+        updatedAt: timestamp
+      };
+
+      this.penalties[existingIndex] = penalty;
+      return { status: "updated", penalty };
+    }
+
+    const penalty: Penalty = {
+      id: `penalty-${this.idNumber++}`,
+      incidentSessionId: input.incidentSessionId,
+      incidentReportId: input.incidentReportId,
+      affectedUserId: input.affectedUserId,
+      penaltyPresetId: input.penaltyPresetId,
+      outcome: input.outcome,
+      delta: input.delta,
+      note: input.note,
+      createdByUserId: input.createdByUserId,
+      updatedByUserId: input.updatedByUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+
+    this.penalties.push(penalty);
+    return { status: "inserted", penalty };
+  }
+
+  async clearPenaltiesForIncidentInSession(
+    input: ClearPenaltiesForIncidentInput
+  ): Promise<number> {
+    const before = this.penalties.length;
+    const remaining = this.penalties.filter(
+      (penalty) =>
+        penalty.incidentSessionId !== input.incidentSessionId ||
+        penalty.incidentReportId !== input.incidentReportId
+    );
+
+    this.penalties.splice(0, this.penalties.length, ...remaining);
+    return before - remaining.length;
+  }
+
+  async getPenaltiesWithReportsForSession(
+    sessionId: string
+  ): Promise<PenaltyDecisionSummaryRow[]> {
+    return this.penalties
+      .filter((penalty) => penalty.incidentSessionId === sessionId)
+      .map((penalty) => ({
+        penalty,
+        report: this.reports.find((report) => report.id === penalty.incidentReportId)!,
+        preset:
+          this.penaltyPresets.find(
+            (preset) => preset.id === penalty.penaltyPresetId
+          ) ?? null
+      }))
+      .filter((row) => row.report)
+      .sort(
+        (left, right) =>
+          left.report.raceNumber - right.report.raceNumber ||
+          left.report.lapNumber - right.report.lapNumber ||
+          left.report.turnNumber - right.report.turnNumber ||
+          left.report.createdAt - right.report.createdAt ||
+          left.penalty.createdAt - right.penalty.createdAt
+      );
+  }
+
+  async getReportForStewardingSessionByDiscordInteractionId(
+    incidentSessionId: string,
+    guildId: string,
+    discordInteractionId: string
+  ): Promise<IncidentReport | null> {
+    const session = this.sessions.find(
+      (candidate) =>
+        candidate.id === incidentSessionId &&
+        candidate.guildId === guildId &&
+        candidate.status === "stewarding"
+    );
+
+    if (!session) {
+      return null;
+    }
+
+    return (
+      this.reports.find(
+        (report) =>
+          report.sessionId === incidentSessionId &&
+          report.guildId === guildId &&
+          report.discordInteractionId === discordInteractionId
+      ) ?? null
+    );
+  }
+
+  private getLatestSessionForGuild(guildId: string): IncidentSession | null {
+    return (
+      this.sessions
+        .filter((session) => session.guildId === guildId)
+        .sort((left, right) => right.startedAt - left.startedAt)[0] ?? null
+    );
+  }
+
+  private updateSession(
+    sessionId: string,
+    expectedStatus: IncidentSession["status"],
+    updates: Partial<IncidentSession>
+  ): IncidentSession | null {
+    const index = this.sessions.findIndex(
+      (session) => session.id === sessionId && session.status === expectedStatus
+    );
+
+    if (index === -1) {
+      return null;
+    }
+
+    const updated = {
+      ...this.sessions[index]!,
+      ...updates
+    };
+
+    this.sessions[index] = updated;
+    return updated;
   }
 }

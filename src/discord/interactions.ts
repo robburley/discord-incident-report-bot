@@ -7,11 +7,23 @@ import {
 } from "../core/config";
 import { createIncidentReport } from "../core/incidents";
 import {
+  addPenaltyPreset,
+  applyPenalty,
+  clearPenaltyForIncident,
+  completeStewarding,
   endIncidentSession,
-  getLatestClosedSessionSummary,
+  getLatestDecisionSummary,
+  getLatestIncidentSessionSummary,
+  listPenaltyPresets,
+  removePenaltyPreset,
+  reopenReporting,
+  reopenStewarding,
+  searchPenaltyPresets,
+  startStewarding,
   startIncidentSession
 } from "../core/sessions";
-import type { IncidentRepository } from "../db/repository";
+import { DISCORD_MESSAGE_LIMIT } from "../core/summary";
+import type { IncidentRepository, PenaltyPreset } from "../db/repository";
 import {
   INCIDENT_COMMAND_NAME,
   INCIDENT_CONFIG_COMMAND_NAME,
@@ -27,6 +39,7 @@ import {
 } from "./modals";
 import type { DiscordRestClient } from "./rest";
 import {
+  autocompleteDiscordResponse,
   deferredEphemeralDiscordMessage,
   discordPongResponse,
   ephemeralDiscordMessage,
@@ -35,6 +48,7 @@ import {
 
 const INTERACTION_TYPE_PING = 1;
 const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
+const INTERACTION_TYPE_APPLICATION_COMMAND_AUTOCOMPLETE = 4;
 const INTERACTION_TYPE_MODAL_SUBMIT = 5;
 const MANAGE_GUILD_PERMISSION = PermissionFlagsBits.ManageGuild;
 
@@ -57,6 +71,7 @@ interface DiscordApplicationCommandData {
 interface DiscordCommandOption {
   readonly name?: unknown;
   readonly value?: unknown;
+  readonly focused?: unknown;
   readonly options?: readonly DiscordCommandOption[];
 }
 
@@ -114,6 +129,10 @@ export async function handleDiscordInteraction(
     return handleApplicationCommand(interaction, dependencies);
   }
 
+  if (interaction.type === INTERACTION_TYPE_APPLICATION_COMMAND_AUTOCOMPLETE) {
+    return handleApplicationCommandAutocomplete(interaction, dependencies);
+  }
+
   if (interaction.type === INTERACTION_TYPE_MODAL_SUBMIT) {
     return handleModalSubmit(interaction, dependencies);
   }
@@ -122,6 +141,65 @@ export async function handleDiscordInteraction(
     status: 200,
     body: ephemeralDiscordMessage("Unsupported Discord interaction type.")
   };
+}
+
+async function handleApplicationCommandAutocomplete(
+  interaction: DiscordInteractionPayload,
+  dependencies: InteractionHandlerDependencies
+): Promise<InteractionHandlerResult> {
+  logInteractionEvent("handle_application_command_autocomplete_start", interaction);
+  const context = getGuildCommandContext(interaction);
+
+  if (context.status === "invalid") {
+    return ok(autocompleteDiscordResponse([]));
+  }
+
+  const repository = getRepository(dependencies);
+
+  if (!repository || !isApplicationCommandData(interaction.data)) {
+    return ok(autocompleteDiscordResponse([]));
+  }
+
+  const commandName = interaction.data.name;
+  const subcommand = getSubcommand(interaction.data);
+  const focused = getFocusedOption(subcommand);
+
+  if (
+    typeof commandName !== "string" ||
+    typeof subcommand?.name !== "string" ||
+    focused?.name !== "penalty"
+  ) {
+    return ok(autocompleteDiscordResponse([]));
+  }
+
+  const supportsPenaltyPreset =
+    (commandName === INCIDENT_SESSION_COMMAND_NAME &&
+      subcommand.name === "penalty") ||
+    (commandName === INCIDENT_CONFIG_COMMAND_NAME &&
+      subcommand.name === "penalty-remove");
+
+  if (!supportsPenaltyPreset) {
+    return ok(autocompleteDiscordResponse([]));
+  }
+
+  const result = await searchPenaltyPresets({
+    repository,
+    guildId: context.guildId,
+    query: typeof focused.value === "string" ? focused.value : ""
+  });
+
+  if (result.status !== "found") {
+    return ok(autocompleteDiscordResponse([]));
+  }
+
+  return ok(
+    autocompleteDiscordResponse(
+      result.presets.map((preset) => ({
+        name: preset.name,
+        value: preset.id
+      }))
+    )
+  );
 }
 
 async function handleApplicationCommand(
@@ -188,7 +266,89 @@ async function handleConfigCommand(
       guildId: context.guildId
     });
 
-    return ok(ephemeralDiscordMessage(result.message));
+    return ok(
+      ephemeralDiscordMessage(
+        "message" in result ? result.message : "Unable to assign penalty."
+      )
+    );
+  }
+
+  if (subcommand?.name === "penalty-add") {
+    const name = getOptionValue(subcommand, "name");
+    const outcome = getOptionValue(subcommand, "outcome");
+    const delta = getOptionValue(subcommand, "delta");
+
+    if (typeof name !== "string" || typeof outcome !== "string") {
+      return ok(ephemeralDiscordMessage("Malformed Discord command payload."));
+    }
+
+    const result = await addPenaltyPreset({
+      repository,
+      guildId: context.guildId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild,
+      name,
+      outcome,
+      delta: typeof delta === "number" ? delta : null
+    });
+
+    if (result.status !== "added") {
+      return ok(ephemeralDiscordMessage(result.message));
+    }
+
+    return ok(
+      ephemeralDiscordMessage(`Penalty preset added: ${result.preset.name}.`)
+    );
+  }
+
+  if (subcommand?.name === "penalty-remove") {
+    const penaltyPreset = getOptionValue(subcommand, "penalty");
+
+    if (typeof penaltyPreset !== "string" || penaltyPreset === "") {
+      return ok(ephemeralDiscordMessage("Malformed Discord command payload."));
+    }
+
+    const result = await removePenaltyPreset({
+      repository,
+      guildId: context.guildId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild,
+      penaltyPreset
+    });
+
+    if (result.status !== "removed") {
+      return ok(ephemeralDiscordMessage(result.message));
+    }
+
+    return ok(
+      ephemeralDiscordMessage(`Penalty preset removed: ${result.preset.name}.`)
+    );
+  }
+
+  if (subcommand?.name === "penalties") {
+    const result = await listPenaltyPresets({
+      repository,
+      guildId: context.guildId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild
+    });
+
+    if (result.status !== "found") {
+      return ok(ephemeralDiscordMessage(result.message));
+    }
+
+    if (result.presets.length === 0) {
+      return ok(ephemeralDiscordMessage("No active penalty presets are configured."));
+    }
+
+    return ok(
+      ephemeralDiscordMessage(
+        formatPenaltyPresetListMessage(result.presets)
+      )
+    );
   }
 
   if (subcommand?.name !== "role") {
@@ -208,7 +368,11 @@ async function handleConfigCommand(
   });
 
   if (result.status === "invalid_role") {
-    return ok(ephemeralDiscordMessage(result.message));
+    return ok(
+      ephemeralDiscordMessage(
+        "message" in result ? result.message : "Unable to clear penalty decisions."
+      )
+    );
   }
 
   return ok(ephemeralDiscordMessage("Incident manager role configured."));
@@ -234,7 +398,8 @@ async function handleSessionCommand(
       guildId: context.guildId,
       channelId: context.channelId,
       userId: context.userId,
-      memberRoleIds: context.memberRoleIds
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild
     });
 
     if (result.status !== "started") {
@@ -260,7 +425,8 @@ async function handleSessionCommand(
         repository,
         guildId: context.guildId,
         userId: context.userId,
-        memberRoleIds: context.memberRoleIds
+        memberRoleIds: context.memberRoleIds,
+        canManageGuild: context.canManageGuild
       });
 
       if (result.status !== "ended") {
@@ -299,11 +465,12 @@ async function handleSessionCommand(
     }
 
     scheduleSummaryAction(dependencies, async () => {
-      const result = await getLatestClosedSessionSummary({
+      const result = await getLatestIncidentSessionSummary({
         repository,
         guildId: context.guildId,
         userId: context.userId,
-        memberRoleIds: context.memberRoleIds
+        memberRoleIds: context.memberRoleIds,
+        canManageGuild: context.canManageGuild
       });
 
       if (result.status !== "found") {
@@ -334,6 +501,243 @@ async function handleSessionCommand(
     return ok(deferredEphemeralDiscordMessage());
   }
 
+  if (subcommand?.name === "steward") {
+    const result = await startStewarding({
+      repository,
+      guildId: context.guildId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild
+    });
+
+    if (result.status !== "started") {
+      return ok(ephemeralDiscordMessage(result.message));
+    }
+
+    scheduleChannelPosts(dependencies, result.session.channelId, [
+      `Stewarding has started for the incident session in <#${result.session.channelId}>.`
+    ]);
+
+    return ok(
+      ephemeralDiscordMessage(
+        "Stewarding started for the latest session awaiting stewards."
+      )
+    );
+  }
+
+  if (subcommand?.name === "penalty") {
+    const incidentId = getOptionValue(subcommand, "incident-id");
+    const affectedUserId = getOptionValue(subcommand, "affected-user");
+    const penaltyPreset = getOptionValue(subcommand, "penalty");
+    const note = getOptionValue(subcommand, "note");
+
+    if (
+      typeof incidentId !== "string" ||
+      typeof penaltyPreset !== "string" ||
+      (typeof note !== "undefined" && typeof note !== "string")
+    ) {
+      return ok(ephemeralDiscordMessage("Malformed Discord command payload."));
+    }
+
+    const result = await applyPenalty({
+      repository,
+      guildId: context.guildId,
+      channelId: context.channelId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild,
+      incidentId,
+      affectedUserId: typeof affectedUserId === "string" ? affectedUserId : null,
+      penaltyPreset,
+      note: typeof note === "string" ? note : null
+    });
+
+    if (result.status === "recorded" || result.status === "updated") {
+      const content = penaltyMessage(result.status, {
+        affectedUserId: result.affectedUserId,
+        incidentId: result.incidentId,
+        outcome: result.outcome,
+        note: result.note
+      });
+      scheduleChannelPosts(dependencies, result.session.channelId, [content]);
+
+      return ok(ephemeralDiscordMessage(content));
+    }
+
+    return ok(
+      ephemeralDiscordMessage(
+        "message" in result ? result.message : "Unable to assign penalty."
+      )
+    );
+  }
+
+  if (subcommand?.name === "penalty-clear") {
+    const incidentId = getOptionValue(subcommand, "incident-id");
+
+    if (typeof incidentId !== "string" || incidentId === "") {
+      return ok(ephemeralDiscordMessage("Malformed Discord command payload."));
+    }
+
+    const result = await clearPenaltyForIncident({
+      repository,
+      guildId: context.guildId,
+      channelId: context.channelId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild,
+      incidentId
+    });
+
+    if (result.status === "cleared") {
+      scheduleChannelPosts(dependencies, result.session.channelId, [
+        `Penalty decisions were cleared for incident ${result.incidentId}.`
+      ]);
+
+      return ok(
+        ephemeralDiscordMessage(
+          `Cleared ${result.clearedCount} penalty decision(s) for incident ${result.incidentId}.`
+        )
+      );
+    }
+
+    if (result.status === "none_found") {
+      return ok(
+        ephemeralDiscordMessage(
+          `No penalty decisions were found for incident ${result.incidentId}.`
+        )
+      );
+    }
+
+    return ok(
+      ephemeralDiscordMessage(
+        "message" in result ? result.message : "Unable to clear penalty decisions."
+      )
+    );
+  }
+
+  if (subcommand?.name === "complete") {
+    const deferredContext = getDeferredInteractionContext(interaction);
+
+    if (!deferredContext) {
+      return ok(ephemeralDiscordMessage("Malformed Discord interaction token."));
+    }
+
+    scheduleSummaryAction(dependencies, async () => {
+      const result = await completeStewarding({
+        repository,
+        guildId: context.guildId,
+        channelId: context.channelId,
+        userId: context.userId,
+        memberRoleIds: context.memberRoleIds,
+        canManageGuild: context.canManageGuild
+      });
+
+      if (result.status !== "completed") {
+        await editDeferredResponse(dependencies, {
+          ...deferredContext,
+          content: result.message
+        });
+        return;
+      }
+
+      const posted = await postSummaryMessages(
+        dependencies,
+        result.session.channelId,
+        [...result.summaryMessages]
+      );
+      await editDeferredResponse(dependencies, {
+        ...deferredContext,
+        content: posted
+          ? "Stewarding completed and decision summary posted."
+          : "Stewarding completed, but I could not post the decision summary. Check the bot can view and send messages in this channel, then run /incident-session decisions."
+      });
+    });
+
+    return ok(deferredEphemeralDiscordMessage());
+  }
+
+  if (subcommand?.name === "reopen-reporting") {
+    const result = await reopenReporting({
+      repository,
+      guildId: context.guildId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild
+    });
+
+    if (result.status !== "reopened") {
+      return ok(ephemeralDiscordMessage(result.message));
+    }
+
+    scheduleChannelPosts(dependencies, result.session.channelId, [
+      `Incident reporting has been reopened in <#${result.session.channelId}>.`
+    ]);
+
+    return ok(ephemeralDiscordMessage("Incident session reopened for reporting."));
+  }
+
+  if (subcommand?.name === "reopen-stewarding") {
+    const result = await reopenStewarding({
+      repository,
+      guildId: context.guildId,
+      userId: context.userId,
+      memberRoleIds: context.memberRoleIds,
+      canManageGuild: context.canManageGuild
+    });
+
+    if (result.status !== "reopened") {
+      return ok(ephemeralDiscordMessage(result.message));
+    }
+
+    scheduleChannelPosts(dependencies, result.session.channelId, [
+      "Stewarding has been reopened for this incident session."
+    ]);
+
+    return ok(
+      ephemeralDiscordMessage("Stewarding reopened for the latest decided session.")
+    );
+  }
+
+  if (subcommand?.name === "decisions") {
+    const deferredContext = getDeferredInteractionContext(interaction);
+
+    if (!deferredContext) {
+      return ok(ephemeralDiscordMessage("Malformed Discord interaction token."));
+    }
+
+    scheduleSummaryAction(dependencies, async () => {
+      const result = await getLatestDecisionSummary({
+        repository,
+        guildId: context.guildId,
+        userId: context.userId,
+        memberRoleIds: context.memberRoleIds,
+        canManageGuild: context.canManageGuild
+      });
+
+      if (result.status !== "found") {
+        await editDeferredResponse(dependencies, {
+          ...deferredContext,
+          content: result.message
+        });
+        return;
+      }
+
+      const posted = await postSummaryMessages(
+        dependencies,
+        result.session.channelId,
+        [...result.summaryMessages]
+      );
+      await editDeferredResponse(dependencies, {
+        ...deferredContext,
+        content: posted
+          ? "Latest stewarding decisions reposted."
+          : "I could not repost the latest stewarding decisions. Check the bot can view and send messages in the original session channel, then try again."
+      });
+    });
+
+    return ok(deferredEphemeralDiscordMessage());
+  }
+
   return ok(ephemeralDiscordMessage("Unsupported incident session command."));
 }
 
@@ -354,16 +758,18 @@ async function handleIncidentCommand(
     return ok(ephemeralDiscordMessage(INCIDENT_SETUP_MESSAGE));
   }
 
-  const activeSession = await repository.getActiveSession(context.guildId);
+  const reportingSession = await repository.getReportingSessionForGuild(
+    context.guildId
+  );
 
-  if (!activeSession) {
-    return ok(ephemeralDiscordMessage("There is no active incident session."));
+  if (!reportingSession) {
+    return ok(ephemeralDiscordMessage("There is no reporting incident session."));
   }
 
-  if (activeSession.channelId !== context.channelId) {
+  if (reportingSession.channelId !== context.channelId) {
     return ok(
       ephemeralDiscordMessage(
-        "Incidents can only be reported in the active session channel."
+        "Incidents can only be reported in the reporting session channel."
       )
     );
   }
@@ -440,7 +846,7 @@ Car Number: ${values.get(CAR_NUMBER_INPUT_ID)}`,
 
   if (
     result.status === "guild_not_configured" ||
-    result.status === "no_active_session" ||
+    result.status === "no_reporting_session" ||
     result.status === "wrong_channel" ||
     result.status === "invalid_report" ||
     result.status === "duplicate_report"
@@ -457,6 +863,7 @@ interface GuildCommandContext {
   readonly channelId: string;
   readonly userId: string;
   readonly memberRoleIds: readonly string[];
+  readonly canManageGuild: boolean;
 }
 
 function getGuildCommandContext(
@@ -502,7 +909,8 @@ function getGuildCommandContext(
     userId,
     memberRoleIds: (interaction.member?.roles ?? []).filter(
       (role): role is string => typeof role === "string"
-    )
+    ),
+    canManageGuild: hasManageGuildPermission(interaction.member?.permissions)
   };
 }
 
@@ -528,6 +936,62 @@ function getOptionValue(
   name: string
 ): unknown {
   return option.options?.find((child) => child.name === name)?.value;
+}
+
+function getFocusedOption(
+  option: DiscordCommandOption | null
+): DiscordCommandOption | null {
+  return option?.options?.find((child) => child.focused === true) ?? null;
+}
+
+function penaltyMessage(
+  status: "recorded" | "updated",
+  input: {
+    readonly affectedUserId: string;
+    readonly incidentId: string;
+    readonly outcome: string;
+    readonly note: string | null;
+  }
+): string {
+  const action = status === "recorded" ? "recorded" : "updated";
+  const base = `Penalty ${action} for <@${input.affectedUserId}> on incident ${input.incidentId}: ${input.outcome}.`;
+
+  return input.note ? `${base} Note: ${input.note}` : base;
+}
+
+function formatPenaltyPresetListMessage(
+  presets: readonly PenaltyPreset[],
+  limit = DISCORD_MESSAGE_LIMIT
+): string {
+  const header = "Configured penalty presets:";
+  const lines: string[] = [header];
+  let included = 0;
+
+  for (const preset of presets) {
+    const line = `- ${preset.name}`;
+    const includedAfterLine = included + 1;
+    const remainingAfterLine = presets.length - includedAfterLine;
+    const suffix =
+      remainingAfterLine > 0
+        ? `\n... and ${remainingAfterLine} other results`
+        : "";
+    const candidate = [...lines, line].join("\n") + suffix;
+
+    if (candidate.length > limit) {
+      break;
+    }
+
+    lines.push(line);
+    included = includedAfterLine;
+  }
+
+  const remaining = presets.length - included;
+
+  if (remaining > 0) {
+    lines.push(`... and ${remaining} other results`);
+  }
+
+  return lines.join("\n");
 }
 
 function getModalValues(

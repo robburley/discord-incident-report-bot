@@ -1,14 +1,20 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, like, ne, or, sql } from "drizzle-orm";
 import { drizzle as drizzleD1 } from "drizzle-orm/d1";
 
 import {
   guildConfigs,
   incidentReports,
-  incidentSessions
+  incidentSessions,
+  penalties,
+  penaltyPresets
 } from "./schema";
 import type {
-  CloseSessionInput,
-  CreateSessionInput,
+  ClearPenaltiesForIncidentInput,
+  CompleteStewardingSessionInput,
+  CreatePenaltyPresetInput,
+  CreateReportingSessionInput,
+  DeactivatePenaltyPresetInput,
+  EndReportingSessionInput,
   DuplicateReportInput,
   GuildConfig,
   IncidentReport,
@@ -16,6 +22,15 @@ import type {
   IncidentSession,
   InsertReportInput,
   InsertReportResult,
+  PenaltyDecisionSummaryRow,
+  PenaltyPreset,
+  ReopenAwaitingStewardsSessionForReportingInput,
+  ReopenAwaitingStewardsSessionForReportingResult,
+  ReopenDecidedSessionForStewardingInput,
+  ReopenDecidedSessionForStewardingResult,
+  StartStewardingSessionInput,
+  UpsertPenaltyInput,
+  UpsertPenaltyResult,
   UpsertGuildConfigInput
 } from "./repository";
 import { RepositoryConflictError } from "./repository";
@@ -65,14 +80,16 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     return (row as GuildConfig | undefined) ?? null;
   }
 
-  async getActiveSession(guildId: string): Promise<IncidentSession | null> {
+  async getReportingSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
     const [row] = await this.db
       .select()
       .from(incidentSessions)
       .where(
         and(
           eq(incidentSessions.guildId, guildId),
-          eq(incidentSessions.status, "active")
+          eq(incidentSessions.status, "reporting")
         )
       )
       .limit(1);
@@ -80,44 +97,64 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     return (row as IncidentSession | undefined) ?? null;
   }
 
-  async createSession(input: CreateSessionInput): Promise<IncidentSession> {
-    const activeSession = await this.getActiveSession(input.guildId);
+  async createReportingSession(
+    input: CreateReportingSessionInput
+  ): Promise<IncidentSession> {
+    const latestSession = await this.getLatestSessionForGuild(input.guildId);
 
-    if (activeSession) {
+    if (latestSession && latestSession.status !== "decided") {
       throw new RepositoryConflictError(
-        `Guild ${input.guildId} already has an active incident session.`
+        `Guild ${input.guildId} has an incident session that is not decided.`
       );
     }
 
-    const [row] = await this.db
-      .insert(incidentSessions)
-      .values({
-        id: this.createId(),
-        guildId: input.guildId,
-        channelId: input.channelId,
-        startedByUserId: input.startedByUserId,
-        endedByUserId: null,
-        status: "active",
-        startedAt: this.now(),
-        endedAt: null
-      })
-      .returning();
+    try {
+      const [row] = await this.db
+        .insert(incidentSessions)
+        .values({
+          id: this.createId(),
+          guildId: input.guildId,
+          channelId: input.channelId,
+          startedByUserId: input.startedByUserId,
+          endedByUserId: null,
+          status: "reporting",
+          startedAt: this.now(),
+          endedAt: null,
+          stewardingStartedByUserId: null,
+          stewardingCompletedByUserId: null,
+          lastReopenedByUserId: null,
+          stewardingStartedAt: null,
+          stewardingCompletedAt: null,
+          lastReopenedAt: null
+        })
+        .returning();
 
-    return requireRow(row, "Session insert did not return a row.");
+      return requireRow(row, "Session insert did not return a row.");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new RepositoryConflictError(
+          `Guild ${input.guildId} has an incident session that is not decided.`
+        );
+      }
+
+      throw error;
+    }
   }
 
-  async closeSession(input: CloseSessionInput): Promise<IncidentSession | null> {
+  async endReportingSession(
+    input: EndReportingSessionInput
+  ): Promise<IncidentSession | null> {
     const [row] = await this.db
       .update(incidentSessions)
       .set({
         endedByUserId: input.endedByUserId,
-        status: "closed",
+        status: "awaiting_stewards",
         endedAt: this.now()
       })
       .where(
         and(
           eq(incidentSessions.id, input.sessionId),
-          eq(incidentSessions.status, "active")
+          eq(incidentSessions.status, "reporting")
         )
       )
       .returning();
@@ -195,7 +232,7 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     return rows as IncidentReport[];
   }
 
-  async getLatestClosedSessionForGuild(
+  async getLatestSessionAwaitingStewardsForGuild(
     guildId: string
   ): Promise<IncidentSession | null> {
     const [row] = await this.db
@@ -204,13 +241,467 @@ export class DrizzleIncidentRepository implements IncidentRepository {
       .where(
         and(
           eq(incidentSessions.guildId, guildId),
-          eq(incidentSessions.status, "closed")
+          eq(incidentSessions.status, "awaiting_stewards")
         )
       )
       .orderBy(desc(incidentSessions.endedAt))
       .limit(1);
 
     return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async getStewardingSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .select()
+      .from(incidentSessions)
+      .where(
+        and(
+          eq(incidentSessions.guildId, guildId),
+          eq(incidentSessions.status, "stewarding")
+        )
+      )
+      .limit(1);
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async getStewardingSessionForChannel(
+    guildId: string,
+    channelId: string
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .select()
+      .from(incidentSessions)
+      .where(
+        and(
+          eq(incidentSessions.guildId, guildId),
+          eq(incidentSessions.channelId, channelId),
+          eq(incidentSessions.status, "stewarding")
+        )
+      )
+      .limit(1);
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async startStewardingSession(
+    input: StartStewardingSessionInput
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .update(incidentSessions)
+      .set({
+        status: "stewarding",
+        stewardingStartedByUserId: input.startedByUserId,
+        stewardingStartedAt: this.now()
+      })
+      .where(
+        and(
+          eq(incidentSessions.id, input.sessionId),
+          eq(incidentSessions.status, "awaiting_stewards")
+        )
+      )
+      .returning();
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async completeStewardingSession(
+    input: CompleteStewardingSessionInput
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .update(incidentSessions)
+      .set({
+        status: "decided",
+        stewardingCompletedByUserId: input.completedByUserId,
+        stewardingCompletedAt: this.now()
+      })
+      .where(
+        and(
+          eq(incidentSessions.id, input.sessionId),
+          eq(incidentSessions.status, "stewarding")
+        )
+      )
+      .returning();
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async reopenAwaitingStewardsSessionForReporting(
+    input: ReopenAwaitingStewardsSessionForReportingInput
+  ): Promise<ReopenAwaitingStewardsSessionForReportingResult> {
+    const latestSession = await this.getLatestSessionForGuild(input.guildId);
+
+    if (!latestSession || latestSession.status !== "awaiting_stewards") {
+      if (latestSession?.status === "stewarding") {
+        return {
+          status: "stewarding_started",
+          session: latestSession
+        };
+      }
+
+      return {
+        status: "no_awaiting_stewards",
+        session: latestSession ?? undefined
+      };
+    }
+
+    const [row] = await this.db
+      .update(incidentSessions)
+      .set({
+        endedByUserId: null,
+        endedAt: null,
+        status: "reporting",
+        lastReopenedByUserId: input.reopenedByUserId,
+        lastReopenedAt: this.now()
+      })
+      .where(
+        and(
+          eq(incidentSessions.id, latestSession.id),
+          eq(incidentSessions.status, "awaiting_stewards")
+        )
+      )
+      .returning();
+
+    const session = row as IncidentSession | undefined;
+
+    if (!session) {
+      return { status: "no_awaiting_stewards" };
+    }
+
+    return { status: "reopened", session };
+  }
+
+  async reopenDecidedSessionForStewarding(
+    input: ReopenDecidedSessionForStewardingInput
+  ): Promise<ReopenDecidedSessionForStewardingResult> {
+    const stewardingSession = await this.getStewardingSessionForGuild(
+      input.guildId
+    );
+
+    if (stewardingSession) {
+      return {
+        status: "already_stewarding",
+        session: stewardingSession
+      };
+    }
+
+    const latestSession = await this.getLatestSessionForGuild(input.guildId);
+
+    if (!latestSession || latestSession.status !== "decided") {
+      return {
+        status: "no_decided_session",
+        session: latestSession ?? undefined
+      };
+    }
+
+    const [row] = await this.db
+      .update(incidentSessions)
+      .set({
+        status: "stewarding",
+        stewardingCompletedByUserId: null,
+        stewardingCompletedAt: null,
+        lastReopenedByUserId: input.reopenedByUserId,
+        lastReopenedAt: this.now()
+      })
+      .where(
+        and(
+          eq(incidentSessions.id, latestSession.id),
+          eq(incidentSessions.status, "decided")
+        )
+      )
+      .returning();
+
+    const session = row as IncidentSession | undefined;
+
+    if (!session) {
+      return { status: "no_decided_session" };
+    }
+
+    return { status: "reopened", session };
+  }
+
+  async getLatestIncidentSummarySessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .select()
+      .from(incidentSessions)
+      .where(
+        and(
+          eq(incidentSessions.guildId, guildId),
+          ne(incidentSessions.status, "reporting")
+        )
+      )
+      .orderBy(desc(incidentSessions.startedAt))
+      .limit(1);
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async getLatestDecidedSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .select()
+      .from(incidentSessions)
+      .where(
+        and(
+          eq(incidentSessions.guildId, guildId),
+          eq(incidentSessions.status, "decided")
+        )
+      )
+      .orderBy(desc(incidentSessions.stewardingCompletedAt))
+      .limit(1);
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
+
+  async createPenaltyPreset(
+    input: CreatePenaltyPresetInput
+  ): Promise<PenaltyPreset> {
+    const now = this.now();
+    try {
+      const [row] = await this.db
+        .insert(penaltyPresets)
+        .values({
+          id: this.createId(),
+          guildId: input.guildId,
+          name: input.name,
+          outcome: input.outcome,
+          delta: input.delta,
+          isActive: true,
+          createdByUserId: input.createdByUserId,
+          deactivatedByUserId: null,
+          createdAt: now,
+          updatedAt: now,
+          deactivatedAt: null
+        })
+        .returning();
+
+      return requireRow(row, "Penalty preset insert did not return a row.");
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new RepositoryConflictError(
+          `Guild ${input.guildId} already has an active penalty preset named ${input.name}.`
+        );
+      }
+
+      throw error;
+    }
+  }
+
+  async listPenaltyPresetsForGuild(guildId: string): Promise<PenaltyPreset[]> {
+    const rows = await this.db
+      .select()
+      .from(penaltyPresets)
+      .where(
+        and(eq(penaltyPresets.guildId, guildId), eq(penaltyPresets.isActive, true))
+      )
+      .orderBy(asc(penaltyPresets.name), asc(penaltyPresets.createdAt));
+
+    return rows as PenaltyPreset[];
+  }
+
+  async searchPenaltyPresetsForGuild(
+    guildId: string,
+    query: string
+  ): Promise<PenaltyPreset[]> {
+    const trimmedQuery = query.trim();
+    const filters = [
+      eq(penaltyPresets.guildId, guildId),
+      eq(penaltyPresets.isActive, true)
+    ];
+
+    if (trimmedQuery) {
+      filters.push(like(penaltyPresets.name, `%${trimmedQuery}%`));
+    }
+
+    const rows = await this.db
+      .select()
+      .from(penaltyPresets)
+      .where(and(...filters))
+      .orderBy(asc(penaltyPresets.name), asc(penaltyPresets.createdAt))
+      .limit(25);
+
+    return rows as PenaltyPreset[];
+  }
+
+  async getActivePenaltyPresetForGuild(
+    guildId: string,
+    presetIdOrName: string
+  ): Promise<PenaltyPreset | null> {
+    const [row] = await this.db
+      .select()
+      .from(penaltyPresets)
+      .where(
+        and(
+          eq(penaltyPresets.guildId, guildId),
+          eq(penaltyPresets.isActive, true),
+          or(
+            eq(penaltyPresets.id, presetIdOrName),
+            eq(penaltyPresets.name, presetIdOrName)
+          )
+        )
+      )
+      .limit(1);
+
+    return (row as PenaltyPreset | undefined) ?? null;
+  }
+
+  async deactivatePenaltyPreset(
+    input: DeactivatePenaltyPresetInput
+  ): Promise<PenaltyPreset | null> {
+    const now = this.now();
+    const [row] = await this.db
+      .update(penaltyPresets)
+      .set({
+        isActive: false,
+        deactivatedByUserId: input.deactivatedByUserId,
+        updatedAt: now,
+        deactivatedAt: now
+      })
+      .where(
+        and(
+          eq(penaltyPresets.id, input.presetId),
+          eq(penaltyPresets.isActive, true)
+        )
+      )
+      .returning();
+
+    return (row as PenaltyPreset | undefined) ?? null;
+  }
+
+  async upsertPenaltyForIncidentSession(
+    input: UpsertPenaltyInput
+  ): Promise<UpsertPenaltyResult> {
+    const [existing] = await this.db
+      .select()
+      .from(penalties)
+      .where(
+        and(
+          eq(penalties.incidentSessionId, input.incidentSessionId),
+          eq(penalties.incidentReportId, input.incidentReportId),
+          eq(penalties.affectedUserId, input.affectedUserId)
+        )
+      )
+      .limit(1);
+
+    const now = this.now();
+
+    const [row] = await this.db
+      .insert(penalties)
+      .values({
+        id: this.createId(),
+        incidentSessionId: input.incidentSessionId,
+        incidentReportId: input.incidentReportId,
+        affectedUserId: input.affectedUserId,
+        penaltyPresetId: input.penaltyPresetId,
+        outcome: input.outcome,
+        delta: input.delta,
+        note: input.note,
+        createdByUserId: input.createdByUserId,
+        updatedByUserId: input.updatedByUserId,
+        createdAt: now,
+        updatedAt: now
+      })
+      .onConflictDoUpdate({
+        target: [
+          penalties.incidentSessionId,
+          penalties.incidentReportId,
+          penalties.affectedUserId
+        ],
+        set: {
+          penaltyPresetId: sql`excluded.penalty_preset_id`,
+          outcome: sql`excluded.outcome`,
+          delta: sql`excluded.delta`,
+          note: sql`excluded.note`,
+          updatedByUserId: sql`excluded.updated_by_user_id`,
+          updatedAt: sql`excluded.updated_at`
+        }
+      })
+      .returning();
+
+    return {
+      status: existing ? "updated" : "inserted",
+      penalty: requireRow(row, "Penalty upsert did not return a row.")
+    };
+  }
+
+  async clearPenaltiesForIncidentInSession(
+    input: ClearPenaltiesForIncidentInput
+  ): Promise<number> {
+    const existingRows = await this.db
+      .select({ id: penalties.id })
+      .from(penalties)
+      .where(
+        and(
+          eq(penalties.incidentSessionId, input.incidentSessionId),
+          eq(penalties.incidentReportId, input.incidentReportId)
+        )
+      );
+
+    await this.db
+      .delete(penalties)
+      .where(
+        and(
+          eq(penalties.incidentSessionId, input.incidentSessionId),
+          eq(penalties.incidentReportId, input.incidentReportId)
+        )
+      );
+
+    return existingRows.length;
+  }
+
+  async getPenaltiesWithReportsForSession(
+    sessionId: string
+  ): Promise<PenaltyDecisionSummaryRow[]> {
+    const rows = await this.db
+      .select({
+        penalty: penalties,
+        report: incidentReports,
+        preset: penaltyPresets
+      })
+      .from(penalties)
+      .innerJoin(
+        incidentReports,
+        eq(penalties.incidentReportId, incidentReports.id)
+      )
+      .leftJoin(penaltyPresets, eq(penalties.penaltyPresetId, penaltyPresets.id))
+      .where(eq(penalties.incidentSessionId, sessionId))
+      .orderBy(
+        incidentReports.raceNumber,
+        incidentReports.lapNumber,
+        incidentReports.turnNumber,
+        incidentReports.createdAt,
+        penalties.createdAt
+      );
+
+    return rows as PenaltyDecisionSummaryRow[];
+  }
+
+  async getReportForStewardingSessionByDiscordInteractionId(
+    incidentSessionId: string,
+    guildId: string,
+    discordInteractionId: string
+  ): Promise<IncidentReport | null> {
+    const [row] = await this.db
+      .select({ report: incidentReports })
+      .from(incidentReports)
+      .innerJoin(incidentSessions, eq(incidentReports.sessionId, incidentSessions.id))
+      .where(
+        and(
+          eq(incidentSessions.id, incidentSessionId),
+          eq(incidentSessions.guildId, guildId),
+          eq(incidentSessions.status, "stewarding"),
+          eq(incidentReports.guildId, guildId),
+          eq(incidentReports.discordInteractionId, discordInteractionId)
+        )
+      )
+      .limit(1);
+
+    return row?.report ?? null;
   }
 
   async getReportByDiscordInteractionId(
@@ -224,6 +715,19 @@ export class DrizzleIncidentRepository implements IncidentRepository {
 
     return (row as IncidentReport | undefined) ?? null;
   }
+
+  private async getLatestSessionForGuild(
+    guildId: string
+  ): Promise<IncidentSession | null> {
+    const [row] = await this.db
+      .select()
+      .from(incidentSessions)
+      .where(eq(incidentSessions.guildId, guildId))
+      .orderBy(desc(incidentSessions.startedAt))
+      .limit(1);
+
+    return (row as IncidentSession | undefined) ?? null;
+  }
 }
 
 export function createD1IncidentRepository(
@@ -235,7 +739,9 @@ export function createD1IncidentRepository(
 const schema = {
   guildConfigs,
   incidentSessions,
-  incidentReports
+  incidentReports,
+  penaltyPresets,
+  penalties
 };
 
 function requireRow<T>(row: unknown, message: string): T {
@@ -244,4 +750,12 @@ function requireRow<T>(row: unknown, message: string): T {
   }
 
   return row as T;
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /unique constraint|unique failed|constraint failed/i.test(error.message);
 }

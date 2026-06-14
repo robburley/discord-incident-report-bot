@@ -1,4 +1,8 @@
-import type { IncidentReport, IncidentSession } from "../db/repository";
+import type {
+  IncidentReport,
+  IncidentSession,
+  PenaltyDecisionSummaryRow
+} from "../db/repository";
 
 export const DISCORD_MESSAGE_LIMIT = 2_000;
 
@@ -7,11 +11,24 @@ export interface FormatSessionSummaryInput {
   readonly reports: readonly IncidentReport[];
 }
 
+export interface FormatStewardingDecisionSummaryInput {
+  readonly session: IncidentSession;
+  readonly decisions: readonly PenaltyDecisionSummaryRow[];
+}
+
 const SUMMARY_TABLE_HEADERS = ["Race", "Lap", "Turn", "Car", "ID", "User"] as const;
+const DECISION_TABLE_HEADERS = [
+  "Race",
+  "Lap",
+  "Turn",
+  "Car",
+  "ID",
+  "Outcome"
+] as const;
 
 export function formatSessionSummary(input: FormatSessionSummaryInput): string {
   const lines = [
-    `Incident session closed for <#${input.session.channelId}>.`
+    `Incident reporting ended for <#${input.session.channelId}>.`
   ];
 
   if (input.reports.length === 0) {
@@ -100,4 +117,65 @@ export function formatSplitSessionSummary(
   limit = DISCORD_MESSAGE_LIMIT
 ): string[] {
   return splitDiscordMessage(formatSessionSummary(input), limit);
+}
+
+export function formatStewardingDecisionSummary(
+  input: FormatStewardingDecisionSummaryInput
+): string {
+  const lines = [
+    `Stewarding decisions for <#${input.session.channelId}>.`
+  ];
+
+  if (input.decisions.length === 0) {
+    lines.push("No penalties were assigned.");
+    return lines.join("\n");
+  }
+
+  lines.push("", ...formatDecisionTable(input.decisions));
+
+  return lines.join("\n");
+}
+
+export function formatSplitStewardingDecisionSummary(
+  input: FormatStewardingDecisionSummaryInput,
+  limit = DISCORD_MESSAGE_LIMIT
+): string[] {
+  return splitDiscordMessage(formatStewardingDecisionSummary(input), limit);
+}
+
+function formatDecisionTable(
+  decisions: readonly PenaltyDecisionSummaryRow[]
+): string[] {
+  const rows = decisions.map(({ penalty, report }) => ({
+    cells: [
+      report.raceNumber.toString(),
+      report.lapNumber.toString(),
+      report.turnNumber.toString(),
+      report.carNumber,
+      report.discordInteractionId,
+      normalizeDiscordTableCell(penalty.outcome)
+    ],
+    affectedUserMention: `<@${penalty.affectedUserId}>`
+  }));
+  const widths = DECISION_TABLE_HEADERS.map((header, columnIndex) =>
+    Math.max(
+      header.length,
+      ...rows.map((row) => row.cells[columnIndex]?.length ?? 0)
+    )
+  );
+  const formatCells = (cells: readonly string[]) =>
+    cells
+      .map((cell, columnIndex) => cell.padEnd(widths[columnIndex] ?? 0))
+      .join("  ");
+
+  return [
+    `\`${formatCells(DECISION_TABLE_HEADERS)}\``,
+    ...rows.map(
+      (row) => `\`${formatCells(row.cells)}\` ${row.affectedUserMention}`
+    )
+  ];
+}
+
+function normalizeDiscordTableCell(value: string): string {
+  return value.replace(/`/g, "'").replace(/\s+/g, " ").trim();
 }
