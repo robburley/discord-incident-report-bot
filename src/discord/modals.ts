@@ -20,7 +20,7 @@ export function incidentReportModalResponse(): DiscordInteractionResponse {
       textInputRow(RACE_NUMBER_INPUT_ID, "Race number", 1, 4),
       textInputRow(LAP_NUMBER_INPUT_ID, "Lap number", 1, 4),
       textInputRow(TURN_NUMBER_INPUT_ID, "Turn / corner number", 1, 4),
-      textInputRow(CAR_NUMBER_INPUT_ID, "Your Car number", 1, 12),
+      textInputRow(CAR_NUMBER_INPUT_ID, "Your car number", 1, 12),
       textInputRow(NOTE_INPUT_ID, "Note", 0, INCIDENT_REPORT_NOTE_LIMIT, false)
     ]
   });
