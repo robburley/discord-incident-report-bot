@@ -411,7 +411,8 @@ describe("Discord interaction handlers", () => {
     expect(restClient.messages).toEqual([
       {
         channelId: "channel-1",
-        content: "Incident reporting session started in <#channel-1>."
+        content:
+          "Incident reporting session started in <#channel-1>. Racers can report incidents with /incident and fill out the form."
       }
     ]);
   });

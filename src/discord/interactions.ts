@@ -446,7 +446,7 @@ async function handleSessionCommand(
     }
 
     scheduleChannelPosts(dependencies, result.session.channelId, [
-      `Incident reporting session started in <#${result.session.channelId}>.`
+      `Incident reporting session started in <#${result.session.channelId}>. Racers can report incidents with /incident and fill out the form.`
     ]);
 
     return ok(ephemeralDiscordMessage("Incident session started."));
