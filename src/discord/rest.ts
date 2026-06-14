@@ -25,10 +25,6 @@ export class FetchDiscordRestClient implements DiscordRestClient {
   }): Promise<{
     readonly channelId: string;
   }> {
-    console.log({
-      event: "rest_client_create_dm_channel",
-      recipientId: input.recipientId
-    });
     const response = await fetch(
         new URL("https://discord.com/api/v10/users/@me/channels"),
         {
@@ -62,11 +58,6 @@ export class FetchDiscordRestClient implements DiscordRestClient {
     readonly channelId: string;
     readonly content: string;
   }): Promise<void> {
-    console.log({
-      event: "rest_client_create_message",
-      channelId: input.channelId,
-      contentLength: input.content.length
-    });
     const response = await fetch(
         new URL(`https://discord.com/api/v10/channels/${input.channelId}/messages`),
         {
@@ -94,11 +85,6 @@ export class FetchDiscordRestClient implements DiscordRestClient {
     readonly interactionToken: string;
     readonly content: string;
   }): Promise<void> {
-    console.log({
-      event: "rest_client_edit_interaction_response",
-      applicationId: input.applicationId,
-      contentLength: input.content.length
-    });
     const response = await fetch(
         new URL(`https://discord.com/api/v10/webhooks/${input.applicationId}/${input.interactionToken}/messages/@original`),
         {

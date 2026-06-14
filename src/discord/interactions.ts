@@ -116,7 +116,6 @@ export async function handleDiscordInteraction(
   interaction: unknown,
   dependencies: InteractionHandlerDependencies = {}
 ): Promise<InteractionHandlerResult> {
-  logInteractionEvent("handle_interaction_start", interaction);
   if (!isInteractionPayload(interaction)) {
     return {
       status: 400,
@@ -153,7 +152,6 @@ async function handleApplicationCommandAutocomplete(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  logInteractionEvent("handle_application_command_autocomplete_start", interaction);
   const context = getGuildCommandContext(interaction);
 
   if (context.status === "invalid") {
@@ -212,7 +210,6 @@ async function handleApplicationCommand(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  logInteractionEvent("handle_application_command_start", interaction);
   const context = getGuildCommandContext(interaction);
 
   if (context.status === "invalid") {
@@ -249,7 +246,6 @@ async function handleConfigCommand(
   context: GuildCommandContext,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  console.log({ event: "handle_config_command_start", context });
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -422,7 +418,6 @@ async function handleSessionCommand(
   context: GuildCommandContext,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  console.log({ event: "handle_session_command_start", context });
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -765,7 +760,6 @@ async function handleIncidentCommand(
   context: GuildCommandContext,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  console.log({ event: "handle_incident_command_start", context });
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -801,7 +795,6 @@ async function handleModalSubmit(
   interaction: DiscordInteractionPayload,
   dependencies: InteractionHandlerDependencies
 ): Promise<InteractionHandlerResult> {
-  logInteractionEvent("handle_modal_submit_start", interaction);
   const repository = getRepository(dependencies);
 
   if (!repository) {
@@ -1236,10 +1229,6 @@ export async function sendDiscordDirectMessages(
   let channelId: string;
 
   try {
-    console.log({
-      event: "discord_dm_channel_create_start",
-      recipientId: input.recipientId
-    });
     const channel = await dependencies.restClient.createDmChannel({
       recipientId: input.recipientId
     });
@@ -1255,12 +1244,6 @@ export async function sendDiscordDirectMessages(
 
   for (const content of input.messages) {
     try {
-      console.log({
-        event: "discord_dm_message_post_start",
-        recipientId: input.recipientId,
-        channelId,
-        contentLength: content.length
-      });
       await dependencies.restClient.createChannelMessage({ channelId, content });
     } catch (error) {
       console.error({
@@ -1335,26 +1318,4 @@ function isModalData(data: DiscordInteractionPayload["data"]): data is DiscordMo
     typeof data === "object" &&
     "custom_id" in data
   );
-}
-
-function logInteractionEvent(event: string, interaction: unknown): void {
-  if (!isInteractionPayload(interaction)) {
-    console.log({ event, interactionType: typeof interaction });
-    return;
-  }
-
-  console.log({
-    event,
-    interactionId:
-      typeof interaction.id === "string" ? interaction.id : undefined,
-    interactionType: interaction.type,
-    commandName: isApplicationCommandData(interaction.data)
-      ? interaction.data.name
-      : undefined,
-    modalCustomId: isModalData(interaction.data)
-      ? interaction.data.custom_id
-      : undefined,
-    guildId: interaction.guild_id,
-    channelId: interaction.channel_id
-  });
 }
