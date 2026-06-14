@@ -1,7 +1,11 @@
 import { PermissionFlagsBits } from "discord-api-types/v10";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { handleDiscordInteraction } from "../../src/discord/interactions";
+import {
+  handleDiscordInteraction,
+  sendDiscordDirectMessages
+} from "../../src/discord/interactions";
+import { getStewardUserGuideMessages } from "../../src/core/help";
 import {
   CAR_NUMBER_INPUT_ID,
   INCIDENT_REPORT_MODAL_CUSTOM_ID,
@@ -47,6 +51,69 @@ describe("Discord interaction handlers", () => {
     repository = new MemoryIncidentRepository();
     restClient = new MemoryDiscordRestClient();
     waitUntilPromises = [];
+  });
+
+  it("sends direct messages through a created DM channel", async () => {
+    const delivered = await sendDiscordDirectMessages(
+      { restClient },
+      {
+        recipientId: "user-1",
+        messages: ["Guide chunk 1", "Guide chunk 2"]
+      }
+    );
+
+    expect(delivered).toBe(true);
+    expect(restClient.dmChannels).toEqual([
+      {
+        recipientId: "user-1"
+      }
+    ]);
+    expect(restClient.messages).toEqual([
+      {
+        channelId: "dm-channel-1",
+        content: "Guide chunk 1"
+      },
+      {
+        channelId: "dm-channel-1",
+        content: "Guide chunk 2"
+      }
+    ]);
+  });
+
+  it("reports direct message failure when DM channel creation fails", async () => {
+    restClient.failDmChannelCreation = true;
+
+    const delivered = await sendDiscordDirectMessages(
+      { restClient },
+      {
+        recipientId: "user-1",
+        messages: ["Guide chunk"]
+      }
+    );
+
+    expect(delivered).toBe(false);
+    expect(restClient.dmChannels).toEqual([]);
+    expect(restClient.messages).toEqual([]);
+  });
+
+  it("reports direct message failure when DM message posting fails", async () => {
+    restClient.failChannelMessages = true;
+
+    const delivered = await sendDiscordDirectMessages(
+      { restClient },
+      {
+        recipientId: "user-1",
+        messages: ["Guide chunk"]
+      }
+    );
+
+    expect(delivered).toBe(false);
+    expect(restClient.dmChannels).toEqual([
+      {
+        recipientId: "user-1"
+      }
+    ]);
+    expect(restClient.messages).toEqual([]);
   });
 
   it("handles /incident-config role when the member has Manage Guild", async () => {
@@ -96,6 +163,24 @@ describe("Discord interaction handlers", () => {
     });
   });
 
+  it("allows configured manager-role stewards to view /incident-config status", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(
+      configStatusInteraction({
+        permissions: "0",
+        roles: ["manager-role"]
+      }),
+      { repository }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "Incident bot is configured. Manager role: <@&manager-role>."
+      }
+    });
+  });
+
   it("returns setup guidance for /incident-config status when unconfigured", async () => {
     const result = await handleDiscordInteraction(configStatusInteraction(), {
       repository
@@ -109,18 +194,150 @@ describe("Discord interaction handlers", () => {
     });
   });
 
-  it("rejects /incident-config status without Manage Guild", async () => {
+  it("rejects /incident-config status without Manage Guild or manager role", async () => {
+    await seedConfig(repository);
+
     const result = await handleDiscordInteraction(
-      configStatusInteraction({ permissions: "0" }),
+      configStatusInteraction({
+        permissions: "0",
+        roles: ["driver-role"]
+      }),
       { repository }
     );
 
     expect(result.body).toMatchObject({
       data: {
         content:
-          "You need Discord Manage Server permission to configure incidents."
+          "You need Discord Manage Server permission or the configured incident manager role to use this command."
       }
     });
+  });
+
+  it("DMs /incident-config help to users with Manage Guild", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(configHelpInteraction(), {
+      repository,
+      restClient
+    });
+
+    expect(result.body).toEqual({
+      type: 4,
+      data: {
+        content: "I sent you the steward guide by DM.",
+        flags: DISCORD_EPHEMERAL_MESSAGE_FLAG
+      }
+    });
+    expect(restClient.dmChannels).toEqual([{ recipientId: "user-1" }]);
+    expect(restClient.messages).toEqual(
+      getStewardUserGuideMessages().map((content) => ({
+        channelId: "dm-channel-1",
+        content
+      }))
+    );
+  });
+
+  it("DMs /incident-config help to configured manager-role stewards", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(
+      configHelpInteraction({
+        permissions: "0",
+        roles: ["manager-role"]
+      }),
+      {
+        repository,
+        restClient
+      }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "I sent you the steward guide by DM."
+      }
+    });
+    expect(restClient.dmChannels).toEqual([{ recipientId: "user-1" }]);
+    expect(restClient.messages).toHaveLength(getStewardUserGuideMessages().length);
+  });
+
+  it("rejects /incident-config help without Manage Guild or manager role", async () => {
+    await seedConfig(repository);
+
+    const result = await handleDiscordInteraction(
+      configHelpInteraction({
+        permissions: "0",
+        roles: ["driver-role"]
+      }),
+      {
+        repository,
+        restClient
+      }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "You need Discord Manage Server permission or the configured incident manager role to use this command."
+      }
+    });
+    expect(restClient.dmChannels).toEqual([]);
+    expect(restClient.messages).toEqual([]);
+  });
+
+  it("returns setup guidance for /incident-config help when unconfigured and non-admin", async () => {
+    const result = await handleDiscordInteraction(
+      configHelpInteraction({
+        permissions: "0",
+        roles: []
+      }),
+      {
+        repository,
+        restClient
+      }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "This server is not configured yet. A server admin must run `/incident-config role role:<manager role>` before incident commands can be used."
+      }
+    });
+    expect(restClient.dmChannels).toEqual([]);
+    expect(restClient.messages).toEqual([]);
+  });
+
+  it("DMs /incident-config help to server managers when unconfigured", async () => {
+    const result = await handleDiscordInteraction(configHelpInteraction(), {
+      repository,
+      restClient
+    });
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "I sent you the steward guide by DM."
+      }
+    });
+    expect(restClient.dmChannels).toEqual([{ recipientId: "user-1" }]);
+    expect(restClient.messages).toHaveLength(getStewardUserGuideMessages().length);
+  });
+
+  it("returns a DM failure message when /incident-config help cannot DM the user", async () => {
+    await seedConfig(repository);
+    restClient.failDmChannelCreation = true;
+
+    const result = await handleDiscordInteraction(configHelpInteraction(), {
+      repository,
+      restClient
+    });
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "I could not DM you the steward guide. Check your Discord privacy settings and try again."
+      }
+    });
+    expect(restClient.dmChannels).toEqual([]);
+    expect(restClient.messages).toEqual([]);
   });
 
   it("returns setup guidance for incident commands in unconfigured servers", async () => {
@@ -865,6 +1082,39 @@ describe("Discord interaction handlers", () => {
     expect(repository.penaltyPresets[0]).toMatchObject({ isActive: false });
   });
 
+  it("allows configured manager-role stewards to manage penalty presets", async () => {
+    await seedConfig(repository);
+
+    const added = await handleDiscordInteraction(
+      configPenaltyAddInteraction("Warning", "Formal warning", {
+        permissions: "0",
+        roles: ["manager-role"]
+      }),
+      { repository }
+    );
+
+    expect(added.body).toMatchObject({
+      data: { content: "Penalty preset added: Warning." }
+    });
+  });
+
+  it("rejects penalty preset commands without Manage Guild or manager role", async () => {
+    await seedConfig(repository);
+
+    const added = await handleDiscordInteraction(
+      configPenaltyAddInteraction("Warning", "Formal warning", {
+        permissions: "0",
+        roles: ["driver-role"]
+      }),
+      { repository }
+    );
+
+    expect(added.body).toMatchObject({
+      data: { content: "Only incident managers can use this command." }
+    });
+    expect(repository.penaltyPresets).toHaveLength(0);
+  });
+
   it("truncates long penalty preset lists inside Discord's message limit", async () => {
     await seedConfig(repository);
 
@@ -1026,17 +1276,42 @@ function configRoleInteraction(input: { readonly permissions?: string } = {}) {
   };
 }
 
-function configStatusInteraction(input: { readonly permissions?: string } = {}) {
+function configStatusInteraction(
+  input: {
+    readonly permissions?: string;
+    readonly roles?: readonly string[];
+  } = {}
+) {
   return {
     ...baseCommand("incident-config"),
     member: {
       user: { id: "user-1" },
-      roles: [],
+      roles: input.roles ?? [],
       permissions: input.permissions ?? PermissionFlagsBits.ManageGuild.toString()
     },
     data: {
       name: "incident-config",
       options: [{ name: "status" }]
+    }
+  };
+}
+
+function configHelpInteraction(
+  input: {
+    readonly permissions?: string;
+    readonly roles?: readonly string[];
+  } = {}
+) {
+  return {
+    ...baseCommand("incident-config"),
+    member: {
+      user: { id: "user-1" },
+      roles: input.roles ?? [],
+      permissions: input.permissions ?? PermissionFlagsBits.ManageGuild.toString()
+    },
+    data: {
+      name: "incident-config",
+      options: [{ name: "help" }]
     }
   };
 }
@@ -1071,14 +1346,30 @@ function sessionInteraction(
 function configPenaltyAddInteraction(
   name: string,
   outcome: string,
-  delta?: number
+  deltaOrInput?:
+    | number
+    | {
+        readonly permissions?: string;
+        readonly roles?: readonly string[];
+      },
+  input: {
+    readonly permissions?: string;
+    readonly roles?: readonly string[];
+  } = {}
 ) {
+  const delta = typeof deltaOrInput === "number" ? deltaOrInput : undefined;
+  const permissionsInput =
+    typeof deltaOrInput === "object" && deltaOrInput !== null
+      ? deltaOrInput
+      : input;
+
   return {
     ...baseCommand("incident-config"),
     member: {
       user: { id: "manager-1" },
-      roles: ["manager-role"],
-      permissions: PermissionFlagsBits.ManageGuild.toString()
+      roles: permissionsInput.roles ?? ["manager-role"],
+      permissions:
+        permissionsInput.permissions ?? PermissionFlagsBits.ManageGuild.toString()
     },
     data: {
       name: "incident-config",
@@ -1265,13 +1556,28 @@ function reportInput(
 }
 
 class MemoryDiscordRestClient {
+  readonly dmChannels: { readonly recipientId: string }[] = [];
   readonly messages: { readonly channelId: string; readonly content: string }[] = [];
   readonly edits: {
     readonly applicationId: string;
     readonly interactionToken: string;
     readonly content: string;
   }[] = [];
+  failDmChannelCreation = false;
   failChannelMessages = false;
+
+  async createDmChannel(input: {
+    readonly recipientId: string;
+  }): Promise<{
+    readonly channelId: string;
+  }> {
+    if (this.failDmChannelCreation) {
+      throw new Error("DM channel creation failed.");
+    }
+
+    this.dmChannels.push(input);
+    return { channelId: "dm-channel-1" };
+  }
 
   async createChannelMessage(input: {
     readonly channelId: string;

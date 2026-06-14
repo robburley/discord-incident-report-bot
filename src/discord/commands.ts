@@ -1,7 +1,6 @@
 import {
   ApplicationCommandOptionType,
-  ApplicationCommandType,
-  PermissionFlagsBits
+  ApplicationCommandType
 } from "discord-api-types/v10";
 import type { RESTPutAPIApplicationGuildCommandsJSONBody } from "discord-api-types/v10";
 
@@ -110,7 +109,6 @@ export const incidentCommands = [
     name: INCIDENT_CONFIG_COMMAND_NAME,
     description: "Configure incident bot settings for this server.",
     type: ApplicationCommandType.ChatInput,
-    default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
     options: [
       {
         name: "role",
@@ -128,6 +126,11 @@ export const incidentCommands = [
       {
         name: "status",
         description: "Show this server's incident bot configuration status.",
+        type: ApplicationCommandOptionType.Subcommand
+      },
+      {
+        name: "help",
+        description: "DM the steward guide for managing incident sessions.",
         type: ApplicationCommandOptionType.Subcommand
       },
       {

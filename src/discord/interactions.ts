@@ -1,10 +1,12 @@
 import { PermissionFlagsBits } from "discord-api-types/v10";
 
+import { hasIncidentManagerPermission } from "../core/authorization";
 import {
   INCIDENT_SETUP_MESSAGE,
   configureGuildManagerRole,
   getGuildConfigStatus
 } from "../core/config";
+import { getStewardUserGuideMessages } from "../core/help";
 import { createIncidentReport } from "../core/incidents";
 import {
   addPenaltyPreset,
@@ -51,6 +53,10 @@ const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
 const INTERACTION_TYPE_APPLICATION_COMMAND_AUTOCOMPLETE = 4;
 const INTERACTION_TYPE_MODAL_SUBMIT = 5;
 const MANAGE_GUILD_PERMISSION = PermissionFlagsBits.ManageGuild;
+const INCIDENT_CONFIG_AUTHORIZATION_MESSAGE =
+  "You need Discord Manage Server permission or the configured incident manager role to use this command.";
+const INCIDENT_CONFIG_HELP_DM_FAILURE_MESSAGE =
+  "I could not DM you the steward guide. Check your Discord privacy settings and try again.";
 
 export interface InteractionHandlerDependencies {
   readonly repository?: IncidentRepository;
@@ -250,17 +256,19 @@ async function handleConfigCommand(
     return ok(ephemeralDiscordMessage("Incident storage is not configured."));
   }
 
-  if (!hasManageGuildPermission(interaction.member?.permissions)) {
-    return ok(
-      ephemeralDiscordMessage(
-        "You need Discord Manage Server permission to configure incidents."
-      )
-    );
-  }
-
   const subcommand = getSubcommand(interaction.data);
 
+  if (subcommand?.name === "help") {
+    return handleConfigHelpCommand(repository, context, dependencies);
+  }
+
   if (subcommand?.name === "status") {
+    const authorization = await authorizeIncidentConfigRead(repository, context);
+
+    if (authorization.status !== "authorized") {
+      return ok(ephemeralDiscordMessage(authorization.message));
+    }
+
     const result = await getGuildConfigStatus({
       repository,
       guildId: context.guildId
@@ -271,6 +279,38 @@ async function handleConfigCommand(
         "message" in result ? result.message : "Unable to assign penalty."
       )
     );
+  }
+
+  if (subcommand?.name === "role") {
+    if (!context.canManageGuild) {
+      return ok(
+        ephemeralDiscordMessage(
+          "You need Discord Manage Server permission to configure incidents."
+        )
+      );
+    }
+
+    const managerRoleId = getOptionValue(subcommand, "role");
+
+    if (typeof managerRoleId !== "string" || managerRoleId === "") {
+      return ok(ephemeralDiscordMessage("Choose a role before configuring incidents."));
+    }
+
+    const result = await configureGuildManagerRole({
+      repository,
+      guildId: context.guildId,
+      managerRoleId
+    });
+
+    if (result.status === "invalid_role") {
+      return ok(
+        ephemeralDiscordMessage(
+          "message" in result ? result.message : "Unable to clear penalty decisions."
+        )
+      );
+    }
+
+    return ok(ephemeralDiscordMessage("Incident manager role configured."));
   }
 
   if (subcommand?.name === "penalty-add") {
@@ -351,31 +391,30 @@ async function handleConfigCommand(
     );
   }
 
-  if (subcommand?.name !== "role") {
-    return ok(ephemeralDiscordMessage("Unsupported incident config command."));
+  return ok(ephemeralDiscordMessage("Unsupported incident config command."));
+}
+
+async function handleConfigHelpCommand(
+  repository: IncidentRepository,
+  context: GuildCommandContext,
+  dependencies: InteractionHandlerDependencies
+): Promise<InteractionHandlerResult> {
+  const authorization = await authorizeIncidentConfigHelp(repository, context);
+
+  if (authorization.status !== "authorized") {
+    return ok(ephemeralDiscordMessage(authorization.message));
   }
 
-  const managerRoleId = getOptionValue(subcommand, "role");
-
-  if (typeof managerRoleId !== "string" || managerRoleId === "") {
-    return ok(ephemeralDiscordMessage("Choose a role before configuring incidents."));
-  }
-
-  const result = await configureGuildManagerRole({
-    repository,
-    guildId: context.guildId,
-    managerRoleId
+  const delivered = await sendDiscordDirectMessages(dependencies, {
+    recipientId: context.userId,
+    messages: getStewardUserGuideMessages()
   });
 
-  if (result.status === "invalid_role") {
-    return ok(
-      ephemeralDiscordMessage(
-        "message" in result ? result.message : "Unable to clear penalty decisions."
-      )
-    );
+  if (!delivered) {
+    return ok(ephemeralDiscordMessage(INCIDENT_CONFIG_HELP_DM_FAILURE_MESSAGE));
   }
 
-  return ok(ephemeralDiscordMessage("Incident manager role configured."));
+  return ok(ephemeralDiscordMessage("I sent you the steward guide by DM."));
 }
 
 async function handleSessionCommand(
@@ -1034,6 +1073,80 @@ function hasManageGuildPermission(permissions: unknown): boolean {
   }
 }
 
+async function authorizeIncidentConfigRead(
+  repository: IncidentRepository,
+  context: GuildCommandContext
+): Promise<
+  | {
+      readonly status: "authorized";
+    }
+  | {
+      readonly status: "unauthorized";
+      readonly message: string;
+    }
+> {
+  if (context.canManageGuild) {
+    return { status: "authorized" };
+  }
+
+  const config = await repository.getGuildConfig(context.guildId);
+
+  if (
+    config &&
+    hasIncidentManagerPermission({
+      managerRoleId: config.managerRoleId,
+      memberRoleIds: context.memberRoleIds
+    })
+  ) {
+    return { status: "authorized" };
+  }
+
+  return {
+    status: "unauthorized",
+    message: INCIDENT_CONFIG_AUTHORIZATION_MESSAGE
+  };
+}
+
+async function authorizeIncidentConfigHelp(
+  repository: IncidentRepository,
+  context: GuildCommandContext
+): Promise<
+  | {
+      readonly status: "authorized";
+    }
+  | {
+      readonly status: "unauthorized";
+      readonly message: string;
+    }
+> {
+  if (context.canManageGuild) {
+    return { status: "authorized" };
+  }
+
+  const config = await repository.getGuildConfig(context.guildId);
+
+  if (!config) {
+    return {
+      status: "unauthorized",
+      message: INCIDENT_SETUP_MESSAGE
+    };
+  }
+
+  if (
+    hasIncidentManagerPermission({
+      managerRoleId: config.managerRoleId,
+      memberRoleIds: context.memberRoleIds
+    })
+  ) {
+    return { status: "authorized" };
+  }
+
+  return {
+    status: "unauthorized",
+    message: INCIDENT_CONFIG_AUTHORIZATION_MESSAGE
+  };
+}
+
 function getDeferredInteractionContext(
   interaction: DiscordInteractionPayload
 ): {
@@ -1100,6 +1213,64 @@ async function postSummaryMessages(
   }
 
   return allPosted;
+}
+
+export async function sendDiscordDirectMessages(
+  dependencies: Pick<InteractionHandlerDependencies, "restClient">,
+  input: {
+    readonly recipientId: string;
+    readonly messages: readonly string[];
+  }
+): Promise<boolean> {
+  if (!dependencies.restClient) {
+    console.error({
+      event: "discord_rest_client_missing",
+      recipientId: input.recipientId
+    });
+    return false;
+  }
+
+  let channelId: string;
+
+  try {
+    console.log({
+      event: "discord_dm_channel_create_start",
+      recipientId: input.recipientId
+    });
+    const channel = await dependencies.restClient.createDmChannel({
+      recipientId: input.recipientId
+    });
+    channelId = channel.channelId;
+  } catch (error) {
+    console.error({
+      event: "discord_dm_channel_create_failed",
+      recipientId: input.recipientId,
+      message: error instanceof Error ? error.message : "Unknown Discord REST error"
+    });
+    return false;
+  }
+
+  for (const content of input.messages) {
+    try {
+      console.log({
+        event: "discord_dm_message_post_start",
+        recipientId: input.recipientId,
+        channelId,
+        contentLength: content.length
+      });
+      await dependencies.restClient.createChannelMessage({ channelId, content });
+    } catch (error) {
+      console.error({
+        event: "discord_dm_message_post_failed",
+        recipientId: input.recipientId,
+        channelId,
+        message: error instanceof Error ? error.message : "Unknown Discord REST error"
+      });
+      return false;
+    }
+  }
+
+  return true;
 }
 
 async function editDeferredResponse(

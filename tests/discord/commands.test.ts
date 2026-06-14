@@ -2,8 +2,7 @@ import {
   type APIApplicationCommandBasicOption,
   type APIApplicationCommandSubcommandOption,
   ApplicationCommandOptionType,
-  ApplicationCommandType,
-  PermissionFlagsBits
+  ApplicationCommandType
 } from "discord-api-types/v10";
 import { describe, expect, it } from "vitest";
 
@@ -106,12 +105,11 @@ describe("incidentCommands", () => {
       (option) => option.name === "penalty-remove"
     ) as APIApplicationCommandSubcommandOption | undefined;
 
-    expect(configCommand?.default_member_permissions).toBe(
-      PermissionFlagsBits.ManageGuild.toString()
-    );
+    expect(configCommand).not.toHaveProperty("default_member_permissions");
     expect(configCommand?.options?.map((option) => option.name)).toEqual([
       "role",
       "status",
+      "help",
       "penalty-add",
       "penalty-remove",
       "penalties"
@@ -124,6 +122,9 @@ describe("incidentCommands", () => {
     });
     expect(
       configCommand?.options?.find((option) => option.name === "status")?.type
+    ).toBe(ApplicationCommandOptionType.Subcommand);
+    expect(
+      configCommand?.options?.find((option) => option.name === "help")?.type
     ).toBe(ApplicationCommandOptionType.Subcommand);
     expect(penaltyAddSubcommand?.options).toMatchObject([
       {

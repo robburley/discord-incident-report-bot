@@ -170,9 +170,27 @@ Admins can verify server setup with:
 /incident-config status
 ```
 
-The status command is visible only to members with Discord's `Manage Server`
-permission. It reports the configured manager role, or tells the admin to run
+The status command can be used by members with Discord's `Manage Server`
+permission or the configured incident manager role. It reports the configured
+manager role, or tells the admin to run
 `/incident-config role role:<manager role>` when setup has not been completed.
+
+Stewards can request the user guide with:
+
+```text
+/incident-config help
+```
+
+The help command can be used by members with Discord's `Manage Server`
+permission or the configured incident manager role. The guide is sent by DM,
+with an ephemeral server confirmation or a clear ephemeral error if DMs are
+blocked.
+
+`/incident-config` may appear to users who cannot use every protected
+subcommand because this release relies on bot-side authorization instead of
+automated Discord command-permission management. Server admins can optionally
+hide or restrict `/incident-config` through Discord Server Settings or
+Integrations command permissions.
 
 ## Incident Workflow
 
@@ -282,9 +300,14 @@ These commands reply ephemerally only:
 
 - `/incident-config role`
 - `/incident-config status`
+- `/incident-config help`
 - `/incident-config penalty-add`
 - `/incident-config penalty-remove`
 - `/incident-config penalties`
+
+`/incident-config help` also sends the steward guide by DM when delivery
+succeeds. Live DM behavior must be smoke tested because user privacy settings,
+bot install state, or the bot/user relationship can block DM delivery.
 
 `/incident-session end`, `/incident-session complete`,
 `/incident-session summary`, and `/incident-session decisions` defer the
@@ -306,7 +329,8 @@ Second test server checklist:
    incident channel.
 6. Run `/incident-config role role:<manager role>` in the second server.
 7. Run `/incident-config status` and confirm it reports the manager role.
-8. Start, steward, complete, and repost a short incident session to confirm
+8. Run `/incident-config help` and confirm the guide is delivered by DM.
+9. Start, steward, complete, and repost a short incident session to confirm
    command handling and channel posting.
 
 If commands do not appear:
@@ -433,6 +457,12 @@ Re-register global commands after any command definition change in
 wait for clients to refresh before treating missing commands as a deployment
 failure.
 
+The steward guide source lives in `docs/steward-user-guide.md`. Update that
+file when steward-facing process documentation changes, run tests and
+typecheck, then redeploy so the bundled Worker content is refreshed. Guide
+content changes alone do not require Discord command registration, but any
+slash command definition change in `src/discord/commands.ts` does.
+
 To rotate `DISCORD_BOT_TOKEN`:
 
 1. Reset or regenerate the bot token in the Discord Developer Portal.
@@ -473,7 +503,11 @@ Production release checklist:
    permissions.
 10. Each installed server has run `/incident-config role role:<manager role>`.
 11. Each installed server passes `/incident-config status`.
-12. A two-server live smoke test has completed successfully.
+12. `/incident-config help` has been smoke tested with a Manage Server user and
+    a configured manager-role steward.
+13. DM failure behavior has been smoke tested or explicitly marked blocked by
+    Discord privacy or account setup.
+14. A two-server live smoke test has completed successfully.
 
 ## Private Release Operations
 
@@ -527,8 +561,8 @@ Private release checklist:
 
 1. Confirm the bot remains private/shared-link only for this version.
 2. Share the install URL only with approved server admins.
-3. Confirm each server admin understands `/incident-config role` and
-   `/incident-config status`.
+3. Confirm each server admin understands `/incident-config role`,
+   `/incident-config status`, and `/incident-config help`.
 4. Confirm support requests have a private contact path.
 5. Confirm any data deletion request is handled by an operator with D1 access.
 6. Revisit Discord verification, hosted privacy terms, and self-service deletion
@@ -538,28 +572,30 @@ Run a live stewarding smoke test in the test guild:
 
 1. Configure a manager role with `/incident-config role`.
 2. Verify setup with `/incident-config status`.
-3. Start a reporting session with `/incident-session start`.
-4. Submit at least two reports with `/incident`.
-5. Try to start a second session before the first is decided and confirm it is
+3. Request the steward guide with `/incident-config help` and confirm the guide
+   arrives by DM.
+4. Start a reporting session with `/incident-session start`.
+5. Submit at least two reports with `/incident`.
+6. Try to start a second session before the first is decided and confirm it is
    rejected.
-6. Configure at least two penalty presets with `/incident-config penalty-add`.
-7. End reporting with `/incident-session end` and confirm the incident list
+7. Configure at least two penalty presets with `/incident-config penalty-add`.
+8. End reporting with `/incident-session end` and confirm the incident list
    posts.
-8. Reopen to reporting with `/incident-session reopen-reporting`, submit
+9. Reopen to reporting with `/incident-session reopen-reporting`, submit
    another report, then end reporting again.
-9. Start stewarding with `/incident-session steward`.
-10. Add one or more penalties with `/incident-session penalty`, using
+10. Start stewarding with `/incident-session steward`.
+11. Add one or more penalties with `/incident-session penalty`, using
     autocomplete for the preset and selecting an affected user.
-11. Update one penalty for the same incident and affected user.
-12. Add a penalty note.
-13. Clear penalties for one incident with `/incident-session penalty-clear`.
-14. Remove a used preset with `/incident-config penalty-remove` and confirm it
+12. Update one penalty for the same incident and affected user.
+13. Add a penalty note.
+14. Clear penalties for one incident with `/incident-session penalty-clear`.
+15. Remove a used preset with `/incident-config penalty-remove` and confirm it
     disappears from `/incident-config penalties` and autocomplete.
-15. Complete stewarding with `/incident-session complete`.
-16. Reopen stewarding with `/incident-session reopen-stewarding`.
-17. Update a penalty, then complete stewarding again.
-18. Confirm the final decision summary contains only incidents with outcomes.
-19. Repost decisions with `/incident-session decisions`.
+16. Complete stewarding with `/incident-session complete`.
+17. Reopen stewarding with `/incident-session reopen-stewarding`.
+18. Update a penalty, then complete stewarding again.
+19. Confirm the final decision summary contains only incidents with outcomes.
+20. Repost decisions with `/incident-session decisions`.
 
 If incident-list posting fails after reporting ends, fix Discord permissions or
 token configuration and use `/incident-session summary` to repost the latest
