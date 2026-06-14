@@ -24,6 +24,9 @@ export interface DiscordAllowedMentions {
 }
 
 export class FetchDiscordRestClient implements DiscordRestClient {
+  private static readonly maxRateLimitRetries = 2;
+  private static readonly maxRateLimitDelayMilliseconds = 5_000;
+
   constructor(
     private readonly botToken: string
   ) {}
@@ -33,19 +36,20 @@ export class FetchDiscordRestClient implements DiscordRestClient {
   }): Promise<{
     readonly channelId: string;
   }> {
-    const response = await fetch(
-        new URL("https://discord.com/api/v10/users/@me/channels"),
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bot ${this.botToken}`,
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            recipient_id: input.recipientId
-          })
-        }
-      );
+    const response = await this.fetchDiscord(
+      new URL("https://discord.com/api/v10/users/@me/channels"),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bot ${this.botToken}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          recipient_id: input.recipientId
+        })
+      },
+      "dm_channel_create"
+    );
 
     if (!response.ok) {
       throw new Error(
@@ -70,20 +74,21 @@ export class FetchDiscordRestClient implements DiscordRestClient {
     readonly content: string;
     readonly allowedMentions?: DiscordAllowedMentions;
   }): Promise<void> {
-    const response = await fetch(
-        new URL(`https://discord.com/api/v10/channels/${input.channelId}/messages`),
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bot ${this.botToken}`,
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            content: input.content,
-            allowed_mentions: toDiscordAllowedMentionsPayload(input.allowedMentions)
-          })
-        }
-      );
+    const response = await this.fetchDiscord(
+      new URL(`https://discord.com/api/v10/channels/${input.channelId}/messages`),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bot ${this.botToken}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          content: input.content,
+          allowed_mentions: toDiscordAllowedMentionsPayload(input.allowedMentions)
+        })
+      },
+      "message_create"
+    );
 
 
     if (!response.ok) {
@@ -107,18 +112,19 @@ export class FetchDiscordRestClient implements DiscordRestClient {
     readonly interactionToken: string;
     readonly content: string;
   }): Promise<void> {
-    const response = await fetch(
-        new URL(`https://discord.com/api/v10/webhooks/${input.applicationId}/${input.interactionToken}/messages/@original`),
-        {
-          method: "PATCH",
-          headers: {
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            content: input.content
-          })
-        }
-      );
+    const response = await this.fetchDiscord(
+      new URL(`https://discord.com/api/v10/webhooks/${input.applicationId}/${input.interactionToken}/messages/@original`),
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          content: input.content
+        })
+      },
+      "interaction_response_edit"
+    );
 
 
     if (!response.ok) {
@@ -135,6 +141,49 @@ export class FetchDiscordRestClient implements DiscordRestClient {
       applicationId: input.applicationId,
       contentLength: input.content.length
     });
+  }
+
+  private async fetchDiscord(
+    url: URL,
+    init: RequestInit,
+    operation: string
+  ): Promise<Response> {
+    let response: Response;
+
+    for (
+      let attempt = 0;
+      attempt <= FetchDiscordRestClient.maxRateLimitRetries;
+      attempt++
+    ) {
+      response = await fetch(url, init);
+
+      if (response.status !== 429) {
+        return response;
+      }
+
+      const retryAfterMilliseconds = await getDiscordRetryAfterMilliseconds(
+        response
+      );
+
+      console.warn({
+        event: "discord_rest_rate_limited",
+        operation,
+        attempt,
+        retryAfterMilliseconds
+      });
+
+      if (
+        attempt === FetchDiscordRestClient.maxRateLimitRetries ||
+        retryAfterMilliseconds >
+          FetchDiscordRestClient.maxRateLimitDelayMilliseconds
+      ) {
+        return response;
+      }
+
+      await sleep(retryAfterMilliseconds);
+    }
+
+    throw new Error("Discord REST request failed before receiving a response.");
   }
 }
 
@@ -178,6 +227,47 @@ function sanitizeDiscordErrorBody(
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 300);
+}
+
+async function getDiscordRetryAfterMilliseconds(
+  response: Response
+): Promise<number> {
+  const retryAfterHeader = response.headers.get("retry-after");
+  const retryAfterHeaderSeconds = retryAfterHeader
+    ? Number.parseFloat(retryAfterHeader)
+    : Number.NaN;
+
+  if (Number.isFinite(retryAfterHeaderSeconds) && retryAfterHeaderSeconds >= 0) {
+    return Math.ceil(retryAfterHeaderSeconds * 1_000);
+  }
+
+  try {
+    const body = await response.clone().json();
+    const retryAfter = isDiscordRateLimitBody(body) ? body.retry_after : null;
+
+    if (typeof retryAfter === "number" && Number.isFinite(retryAfter)) {
+      return Math.ceil(Math.max(0, retryAfter) * 1_000);
+    }
+  } catch {
+    // Fall back to a short delay when Discord returns a malformed 429 body.
+  }
+
+  return 1_000;
+}
+
+function isDiscordRateLimitBody(
+  body: unknown
+): body is { readonly retry_after: number } {
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    "retry_after" in body &&
+    typeof body.retry_after === "number"
+  );
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function isDmChannelResponse(body: unknown): body is { readonly id: string } {

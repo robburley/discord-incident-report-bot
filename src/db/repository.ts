@@ -185,6 +185,15 @@ export interface InsertProcessedDiscordInteractionInput {
   readonly subcommandName: string;
 }
 
+export interface IncrementInteractionRateLimitInput {
+  readonly key: string;
+  readonly guildId: string;
+  readonly userId: string;
+  readonly action: string;
+  readonly windowSeconds: number;
+  readonly limit: number;
+}
+
 export type InsertReportResult =
   | {
       readonly status: "inserted";
@@ -211,6 +220,17 @@ export type InsertProcessedDiscordInteractionResult =
     }
   | {
       readonly status: "duplicate";
+    };
+
+export type IncrementInteractionRateLimitResult =
+  | {
+      readonly status: "allowed";
+      readonly count: number;
+    }
+  | {
+      readonly status: "limited";
+      readonly count: number;
+      readonly retryAfterSeconds: number;
     };
 
 export interface PenaltyDecisionSummaryRow {
@@ -300,4 +320,7 @@ export interface IncidentRepository {
   insertProcessedDiscordInteraction(
     input: InsertProcessedDiscordInteractionInput
   ): Promise<InsertProcessedDiscordInteractionResult>;
+  incrementInteractionRateLimit(
+    input: IncrementInteractionRateLimitInput
+  ): Promise<IncrementInteractionRateLimitResult>;
 }

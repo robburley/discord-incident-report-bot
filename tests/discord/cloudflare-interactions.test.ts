@@ -44,6 +44,24 @@ describe("Cloudflare interaction entrypoint", () => {
     });
   });
 
+  it("rejects oversized request bodies before signature verification", async () => {
+    const fixture = createSigningFixture();
+    const body = "x".repeat(64 * 1024 + 1);
+
+    const response = await worker.fetch(
+      new Request("https://example.com/", {
+        method: "POST",
+        body,
+        headers: fixture.signBody(body)
+      }),
+      { DISCORD_PUBLIC_KEY: fixture.publicKeyHex }
+    );
+
+    await expectJsonResponse(response, 413, {
+      error: "Request body too large."
+    });
+  });
+
   it("returns 401 when the signature does not match the raw body", async () => {
     const fixture = createSigningFixture();
     const signedBody = JSON.stringify({ type: 1 });

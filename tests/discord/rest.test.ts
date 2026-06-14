@@ -106,6 +106,35 @@ describe("FetchDiscordRestClient", () => {
     );
   });
 
+  it("retries short Discord rate limits before failing the request", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ retry_after: 0 }), { status: 429 })
+      )
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const client = new FetchDiscordRestClient("bot-token");
+
+    await expect(
+      client.createChannelMessage({
+        channelId: "channel-1",
+        content: "Guide chunk"
+      })
+    ).resolves.toBeUndefined();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "discord_rest_rate_limited",
+        operation: "message_create",
+        retryAfterMilliseconds: 0
+      })
+    );
+  });
+
   it("rejects failed DM channel creation", async () => {
     vi.stubGlobal(
       "fetch",
@@ -129,7 +158,12 @@ describe("FetchDiscordRestClient", () => {
     ].join("\n");
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(oversizedBody, { status: 429 }))
+      vi.fn(async () =>
+        new Response(oversizedBody, {
+          status: 429,
+          headers: { "retry-after": "10" }
+        })
+      )
     );
 
     const client = new FetchDiscordRestClient("bot-token");

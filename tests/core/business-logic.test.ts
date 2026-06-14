@@ -48,6 +48,8 @@ import type {
   InsertReportResult,
   InsertProcessedDiscordInteractionInput,
   InsertProcessedDiscordInteractionResult,
+  IncrementInteractionRateLimitInput,
+  IncrementInteractionRateLimitResult,
   Penalty,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
@@ -1461,6 +1463,10 @@ class MemoryIncidentRepository implements IncidentRepository {
   readonly penaltyPresets: PenaltyPreset[] = [];
   readonly penalties: Penalty[] = [];
   readonly processedInteractions = new Set<string>();
+  readonly rateLimits = new Map<
+    string,
+    { readonly windowStart: number; readonly requestCount: number }
+  >();
   private now = 1_000;
   private idNumber = 1;
 
@@ -1593,6 +1599,32 @@ class MemoryIncidentRepository implements IncidentRepository {
 
     this.processedInteractions.add(input.interactionId);
     return { status: "inserted" };
+  }
+
+  async incrementInteractionRateLimit(
+    input: IncrementInteractionRateLimitInput
+  ): Promise<IncrementInteractionRateLimitResult> {
+    const windowMilliseconds = input.windowSeconds * 1_000;
+    const windowStart =
+      Math.floor(this.now / windowMilliseconds) * windowMilliseconds;
+    const existing = this.rateLimits.get(input.key);
+    const requestCount =
+      existing?.windowStart === windowStart ? existing.requestCount + 1 : 1;
+
+    this.rateLimits.set(input.key, { windowStart, requestCount });
+
+    if (requestCount <= input.limit) {
+      return { status: "allowed", count: requestCount };
+    }
+
+    return {
+      status: "limited",
+      count: requestCount,
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((windowStart + windowMilliseconds - this.now) / 1_000)
+      )
+    };
   }
 
   async findDuplicateReportForUser(

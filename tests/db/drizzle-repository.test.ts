@@ -137,6 +137,22 @@ CREATE TABLE processed_discord_interactions (
 
 CREATE INDEX processed_discord_interactions_guild_lookup_idx
 ON processed_discord_interactions (guild_id, created_at);
+
+CREATE TABLE interaction_rate_limits (
+  rate_limit_key text PRIMARY KEY NOT NULL,
+  guild_id text NOT NULL,
+  user_id text NOT NULL,
+  action text NOT NULL,
+  window_start integer NOT NULL,
+  request_count integer NOT NULL,
+  updated_at integer NOT NULL
+);
+
+CREATE INDEX interaction_rate_limits_stale_lookup_idx
+ON interaction_rate_limits (updated_at);
+
+CREATE INDEX interaction_rate_limits_guild_lookup_idx
+ON interaction_rate_limits (guild_id, action, window_start);
 `;
 
 describe("DrizzleIncidentRepository", () => {
@@ -721,6 +737,29 @@ describe("DrizzleIncidentRepository", () => {
     expect(first.status).toBe("inserted");
     expect(duplicate.status).toBe("duplicate");
     expect(second.status).toBe("inserted");
+  });
+
+  it("limits interaction rate counters within a fixed window", async () => {
+    const input = {
+      key: "user:guild-1:user-1:incident-session:start",
+      guildId: "guild-1",
+      userId: "user-1",
+      action: "incident-session:start",
+      windowSeconds: 60,
+      limit: 2
+    };
+
+    const first = await repository.incrementInteractionRateLimit(input);
+    const second = await repository.incrementInteractionRateLimit(input);
+    const third = await repository.incrementInteractionRateLimit(input);
+
+    expect(first).toEqual({ status: "allowed", count: 1 });
+    expect(second).toEqual({ status: "allowed", count: 2 });
+    expect(third).toMatchObject({
+      status: "limited",
+      count: 3,
+      retryAfterSeconds: 59
+    });
   });
 
   it("finds exact duplicate reports from the same user in the same session", async () => {

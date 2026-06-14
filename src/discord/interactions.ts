@@ -59,6 +59,12 @@ const INCIDENT_CONFIG_HELP_DM_FAILURE_MESSAGE =
   "I could not DM you the steward guide. Check your Discord privacy settings and try again.";
 const DUPLICATE_INTERACTION_MESSAGE =
   "This interaction was already processed.";
+const RATE_LIMITED_INTERACTION_MESSAGE =
+  "You are doing that too quickly. Try again in a moment.";
+const USER_RATE_LIMIT_WINDOW_SECONDS = 60;
+const USER_RATE_LIMIT_MAX_REQUESTS = 5;
+const GUILD_RATE_LIMIT_WINDOW_SECONDS = 60;
+const GUILD_RATE_LIMIT_MAX_REQUESTS = 60;
 const STATE_CHANGING_CONFIG_SUBCOMMANDS = new Set([
   "role",
   "penalty-add",
@@ -283,6 +289,18 @@ async function handleConfigCommand(
     return idempotency;
   }
 
+  const rateLimit = await enforceStateChangingCommandRateLimit({
+    repository,
+    context,
+    commandName: INCIDENT_CONFIG_COMMAND_NAME,
+    subcommandName: typeof subcommand?.name === "string" ? subcommand.name : null,
+    stateChangingSubcommands: STATE_CHANGING_CONFIG_SUBCOMMANDS
+  });
+
+  if (rateLimit) {
+    return rateLimit;
+  }
+
   if (subcommand?.name === "help") {
     return handleConfigHelpCommand(repository, context, dependencies);
   }
@@ -466,6 +484,18 @@ async function handleSessionCommand(
 
   if (idempotency) {
     return idempotency;
+  }
+
+  const rateLimit = await enforceStateChangingCommandRateLimit({
+    repository,
+    context,
+    commandName: INCIDENT_SESSION_COMMAND_NAME,
+    subcommandName: typeof subcommand?.name === "string" ? subcommand.name : null,
+    stateChangingSubcommands: STATE_CHANGING_SESSION_SUBCOMMANDS
+  });
+
+  if (rateLimit) {
+    return rateLimit;
   }
 
   if (subcommand?.name === "start") {
@@ -866,6 +896,17 @@ async function handleModalSubmit(
     return ok(ephemeralDiscordMessage("Malformed modal submission."));
   }
 
+  const rateLimit = await enforceInteractionRateLimit({
+    repository,
+    guildId: context.guildId,
+    userId: context.userId,
+    action: "modal:incident-report"
+  });
+
+  if (rateLimit) {
+    return rateLimit;
+  }
+
   const values = getModalValues(interaction.data.components ?? []);
   const result = await createIncidentReport({
     repository,
@@ -1029,6 +1070,63 @@ async function ensureStateChangingInteractionNotProcessed(input: {
 
   if (result.status === "duplicate") {
     return ok(ephemeralDiscordMessage(DUPLICATE_INTERACTION_MESSAGE));
+  }
+
+  return null;
+}
+
+async function enforceStateChangingCommandRateLimit(input: {
+  readonly repository: IncidentRepository;
+  readonly context: GuildCommandContext;
+  readonly commandName: string;
+  readonly subcommandName: string | null;
+  readonly stateChangingSubcommands: ReadonlySet<string>;
+}): Promise<InteractionHandlerResult | null> {
+  if (
+    !input.subcommandName ||
+    !input.stateChangingSubcommands.has(input.subcommandName)
+  ) {
+    return null;
+  }
+
+  return enforceInteractionRateLimit({
+    repository: input.repository,
+    guildId: input.context.guildId,
+    userId: input.context.userId,
+    action: `${input.commandName}:${input.subcommandName}`
+  });
+}
+
+async function enforceInteractionRateLimit(input: {
+  readonly repository: IncidentRepository;
+  readonly guildId: string;
+  readonly userId: string;
+  readonly action: string;
+}): Promise<InteractionHandlerResult | null> {
+  const userLimit = await input.repository.incrementInteractionRateLimit({
+    key: `user:${input.guildId}:${input.userId}:${input.action}`,
+    guildId: input.guildId,
+    userId: input.userId,
+    action: input.action,
+    windowSeconds: USER_RATE_LIMIT_WINDOW_SECONDS,
+    limit: USER_RATE_LIMIT_MAX_REQUESTS
+  });
+
+  if (userLimit.status === "limited") {
+    return ok(ephemeralDiscordMessage(RATE_LIMITED_INTERACTION_MESSAGE));
+  }
+
+  const guildLimit = await input.repository.incrementInteractionRateLimit({
+    key: `guild:${input.guildId}:${input.action}`,
+    guildId: input.guildId,
+    userId: input.userId,
+    action: input.action,
+    windowSeconds: GUILD_RATE_LIMIT_WINDOW_SECONDS,
+    limit: GUILD_RATE_LIMIT_MAX_REQUESTS
+  });
+
+  if (guildLimit.status === "limited") {
+    return ok(ephemeralDiscordMessage(RATE_LIMITED_INTERACTION_MESSAGE));
   }
 
   return null;

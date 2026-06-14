@@ -3,6 +3,7 @@ import { drizzle as drizzleD1 } from "drizzle-orm/d1";
 
 import {
   guildConfigs,
+  interactionRateLimits,
   incidentReports,
   incidentSessions,
   penalties,
@@ -25,6 +26,8 @@ import type {
   InsertReportResult,
   InsertProcessedDiscordInteractionInput,
   InsertProcessedDiscordInteractionResult,
+  IncrementInteractionRateLimitInput,
+  IncrementInteractionRateLimitResult,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
   ReopenDecidedSessionForStewardingInput,
@@ -752,6 +755,57 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     }
   }
 
+  async incrementInteractionRateLimit(
+    input: IncrementInteractionRateLimitInput
+  ): Promise<IncrementInteractionRateLimitResult> {
+    const now = this.now();
+    const windowMilliseconds = input.windowSeconds * 1_000;
+    const windowStart = Math.floor(now / windowMilliseconds) * windowMilliseconds;
+
+    const [row] = await this.db
+      .insert(interactionRateLimits)
+      .values({
+        rateLimitKey: input.key,
+        guildId: input.guildId,
+        userId: input.userId,
+        action: input.action,
+        windowStart,
+        requestCount: 1,
+        updatedAt: now
+      })
+      .onConflictDoUpdate({
+        target: interactionRateLimits.rateLimitKey,
+        set: {
+          guildId: input.guildId,
+          userId: input.userId,
+          action: input.action,
+          windowStart,
+          requestCount: sql`case when ${interactionRateLimits.windowStart} = ${windowStart} then ${interactionRateLimits.requestCount} + 1 else 1 end`,
+          updatedAt: now
+        }
+      })
+      .returning({
+        requestCount: interactionRateLimits.requestCount,
+        windowStart: interactionRateLimits.windowStart
+      });
+
+    const requestCount = Number(row?.requestCount ?? 1);
+    const storedWindowStart = Number(row?.windowStart ?? windowStart);
+
+    if (requestCount <= input.limit) {
+      return { status: "allowed", count: requestCount };
+    }
+
+    return {
+      status: "limited",
+      count: requestCount,
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((storedWindowStart + windowMilliseconds - now) / 1_000)
+      )
+    };
+  }
+
   private async getLatestSessionForGuild(
     guildId: string
   ): Promise<IncidentSession | null> {
@@ -774,6 +828,7 @@ export function createD1IncidentRepository(
 
 const schema = {
   guildConfigs,
+  interactionRateLimits,
   incidentSessions,
   incidentReports,
   penaltyPresets,

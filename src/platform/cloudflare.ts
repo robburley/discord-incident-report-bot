@@ -12,6 +12,8 @@ import {
 import { createD1IncidentRepository } from "../db/drizzle-repository";
 import { assertRequiredEnv, type Env } from "./env";
 
+const MAX_DISCORD_INTERACTION_BODY_BYTES = 64 * 1024;
+
 export default {
   async fetch(
     request: Request,
@@ -36,7 +38,24 @@ export default {
       return jsonResponse({ error: "Method not allowed." }, { status: 405 });
     }
 
+    const contentLength = request.headers.get("content-length");
+
+    if (
+      contentLength &&
+      Number.isFinite(Number(contentLength)) &&
+      Number(contentLength) > MAX_DISCORD_INTERACTION_BODY_BYTES
+    ) {
+      return jsonResponse({ error: "Request body too large." }, { status: 413 });
+    }
+
     const rawBody = await request.text();
+
+    if (
+      new TextEncoder().encode(rawBody).byteLength >
+      MAX_DISCORD_INTERACTION_BODY_BYTES
+    ) {
+      return jsonResponse({ error: "Request body too large." }, { status: 413 });
+    }
   
     const isValidSignature = await verifyDiscordRequestSignature({
       rawBody,

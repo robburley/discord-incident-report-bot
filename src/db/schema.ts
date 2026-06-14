@@ -171,3 +171,26 @@ export const processedDiscordInteractions = sqliteTable(
     )
   })
 );
+
+export const interactionRateLimits = sqliteTable(
+  "interaction_rate_limits",
+  {
+    rateLimitKey: text("rate_limit_key").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    userId: text("user_id").notNull(),
+    action: text("action").notNull(),
+    windowStart: integer("window_start").notNull(),
+    requestCount: integer("request_count").notNull(),
+    updatedAt: integer("updated_at").notNull()
+  },
+  (table) => ({
+    staleLookup: index("interaction_rate_limits_stale_lookup_idx").on(
+      table.updatedAt
+    ),
+    guildLookup: index("interaction_rate_limits_guild_lookup_idx").on(
+      table.guildId,
+      table.action,
+      table.windowStart
+    )
+  })
+);
