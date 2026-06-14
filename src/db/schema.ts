@@ -67,6 +67,7 @@ export const incidentReports = sqliteTable(
     lapNumber: integer("lap_number").notNull(),
     turnNumber: integer("turn_number").notNull(),
     carNumber: text("car_number").notNull(),
+    note: text("note"),
     createdAt: integer("created_at").notNull()
   },
   (table) => ({

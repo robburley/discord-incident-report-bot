@@ -29,7 +29,6 @@ describe("incidentCommands", () => {
 
     expect(sessionCommand?.options?.map((option) => option.name)).toEqual([
       "start",
-      "end",
       "summary",
       "steward",
       "penalty",
@@ -44,6 +43,37 @@ describe("incidentCommands", () => {
         (option) => option.type === ApplicationCommandOptionType.Subcommand
       )
     ).toBe(true);
+  });
+
+  it("keeps incident-session recovery and stewarding utility subcommands", () => {
+    const sessionCommand = incidentCommands.find(
+      (command) => command.name === "incident-session"
+    );
+    const subcommandNames =
+      sessionCommand?.options?.map((option) => option.name) ?? [];
+
+    expect(subcommandNames).not.toContain("end");
+    expect(subcommandNames).toEqual(
+      expect.arrayContaining([
+        "summary",
+        "decisions",
+        "penalty-clear",
+        "reopen-reporting",
+        "reopen-stewarding"
+      ])
+    );
+  });
+
+  it("describes steward as closing reporting and starting stewarding", () => {
+    const sessionCommand = incidentCommands.find(
+      (command) => command.name === "incident-session"
+    );
+    const stewardSubcommand = sessionCommand?.options?.find(
+      (option) => option.name === "steward"
+    );
+
+    expect(stewardSubcommand?.description).toMatch(/close reporting/i);
+    expect(stewardSubcommand?.description).toMatch(/start stewarding/i);
   });
 
   it("defines incident-session penalty options", () => {

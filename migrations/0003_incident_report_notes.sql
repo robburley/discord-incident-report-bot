@@ -1,0 +1,1 @@
+ALTER TABLE `incident_reports` ADD `note` text;

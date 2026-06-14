@@ -7,9 +7,13 @@ import {
 } from "../../src/discord/interactions";
 import { getStewardUserGuideMessages } from "../../src/core/help";
 import {
+  INCIDENT_REPORT_NOTE_LIMIT
+} from "../../src/core/incidents";
+import {
   CAR_NUMBER_INPUT_ID,
   INCIDENT_REPORT_MODAL_CUSTOM_ID,
   LAP_NUMBER_INPUT_ID,
+  NOTE_INPUT_ID,
   RACE_NUMBER_INPUT_ID,
   TURN_NUMBER_INPUT_ID
 } from "../../src/discord/modals";
@@ -32,10 +36,10 @@ import type {
   Penalty,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
-  ReopenAwaitingStewardsSessionForReportingInput,
-  ReopenAwaitingStewardsSessionForReportingResult,
   ReopenDecidedSessionForStewardingInput,
   ReopenDecidedSessionForStewardingResult,
+  ReopenStewardingSessionForReportingInput,
+  ReopenStewardingSessionForReportingResult,
   StartStewardingSessionInput,
   UpsertPenaltyInput,
   UpsertPenaltyResult,
@@ -449,7 +453,19 @@ describe("Discord interaction handlers", () => {
       type: 9,
       data: {
         custom_id: INCIDENT_REPORT_MODAL_CUSTOM_ID,
-        title: "Report incident"
+        title: "Report incident",
+        components: expect.arrayContaining([
+          expect.objectContaining({
+            components: [
+              expect.objectContaining({
+                custom_id: NOTE_INPUT_ID,
+                label: "Note",
+                max_length: INCIDENT_REPORT_NOTE_LIMIT,
+                required: false
+              })
+            ]
+          })
+        ])
       }
     });
     expect(JSON.stringify(result.body)).toContain("Race number");
@@ -460,9 +476,13 @@ describe("Discord interaction handlers", () => {
     await seedConfig(repository);
     await seedReportingSession(repository);
 
-    const result = await handleDiscordInteraction(modalSubmitInteraction(), {
-      repository
-    });
+    const result = await handleDiscordInteraction(
+      modalSubmitInteraction(),
+      {
+        repository,
+        restClient
+      }
+    );
 
     expect(result.body).toMatchObject({
       data: {
@@ -477,7 +497,68 @@ describe("Discord interaction handlers", () => {
         raceNumber: 1,
         lapNumber: 2,
         turnNumber: 3,
-        carNumber: "07"
+        carNumber: "07",
+        note: null
+      }
+    ]);
+    expect(restClient.messages).toEqual([
+      {
+        channelId: "channel-1",
+        content: [
+          "An incident report has been submitted by <@user-1>.",
+          "Details:",
+          "Race Number: 1",
+          "Lap Number: 2",
+          "Turn / Corner Number: 3",
+          "Car Number: 07"
+        ].join("\n")
+      }
+    ]);
+  });
+
+  it("stores incident modal submissions with notes", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
+
+    const result = await handleDiscordInteraction(
+      modalSubmitInteraction({
+        extraComponents: [modalRow(NOTE_INPUT_ID, " clipped `track limits` \n on exit ")]
+      }),
+      {
+        repository,
+        restClient
+      }
+    );
+
+    expect(result.body).toMatchObject({
+      data: {
+        content: "Incident report submitted."
+      }
+    });
+    expect(repository.reports).toMatchObject([
+      {
+        guildId: "guild-1",
+        submittedByUserId: "user-1",
+        discordInteractionId: "modal-interaction-1",
+        raceNumber: 1,
+        lapNumber: 2,
+        turnNumber: 3,
+        carNumber: "07",
+        note: "clipped 'track limits' on exit"
+      }
+    ]);
+    expect(restClient.messages).toEqual([
+      {
+        channelId: "channel-1",
+        content: [
+          "An incident report has been submitted by <@user-1>.",
+          "Details:",
+          "Race Number: 1",
+          "Lap Number: 2",
+          "Turn / Corner Number: 3",
+          "Car Number: 07",
+          "Note: clipped 'track limits' on exit"
+        ].join("\n")
       }
     ]);
   });
@@ -501,12 +582,12 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
-  it("defers /incident-session end and posts final summary messages", async () => {
+  it("defers /incident-session steward, posts the incident summary, and starts stewarding", async () => {
     await seedConfig(repository);
     const session = await seedReportingSession(repository);
     await repository.insertReport(reportInput(session, "report-interaction-1"));
 
-    const result = await handleDiscordInteraction(sessionInteraction("end"), {
+    const result = await handleDiscordInteraction(sessionInteraction("steward"), {
       repository,
       restClient,
       waitUntil: captureWaitUntil
@@ -521,18 +602,25 @@ describe("Discord interaction handlers", () => {
 
     await flushWaitUntil();
 
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
     expect(restClient.messages).toEqual([
       {
         channelId: "channel-1",
         content:
           "Incident reporting ended for <#channel-1>.\n\n`Race  Lap  Turn  Car  ID                    User`\n`1     2    3     07   report-interaction-1` <@user-1>"
+      },
+      {
+        channelId: "channel-1",
+        content:
+          "Stewarding has started for the incident session in <#channel-1>."
       }
     ]);
     expect(restClient.edits).toEqual([
       {
         applicationId: "app-1",
-        interactionToken: "token-end",
-        content: "Incident session ended and summary posted."
+        interactionToken: "token-steward",
+        content:
+          "Reporting closed, incident summary posted, and stewarding started."
       }
     ]);
   });
@@ -692,13 +780,9 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
-  it("starts stewarding and schedules a public stewarding message", async () => {
+  it("posts an empty-session summary when stewarding starts with no reports", async () => {
     await seedConfig(repository);
-    const session = await seedReportingSession(repository);
-    await repository.endReportingSession({
-      sessionId: session.id,
-      endedByUserId: "manager-1"
-    });
+    await seedReportingSession(repository);
 
     const result = await handleDiscordInteraction(sessionInteraction("steward"), {
       repository,
@@ -708,13 +792,19 @@ describe("Discord interaction handlers", () => {
 
     await flushWaitUntil();
 
-    expect(result.body).toMatchObject({
+    expect(result.body).toEqual({
+      type: 5,
       data: {
-        content: "Stewarding started for the latest session awaiting stewards."
+        flags: DISCORD_EPHEMERAL_MESSAGE_FLAG
       }
     });
     expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
     expect(restClient.messages).toEqual([
+      {
+        channelId: "channel-1",
+        content:
+          "Incident reporting ended for <#channel-1>.\nNo incidents were reported."
+      },
       {
         channelId: "channel-1",
         content:
@@ -723,18 +813,91 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
-  it("returns an ephemeral error when stewarding cannot start", async () => {
+  it("posts multiple report rows when stewarding starts", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.insertReport(reportInput(session, "report-interaction-2", "user-2"));
+    await repository.insertReport(reportInput(session, "report-interaction-1", "user-1"));
+
+    const result = await handleDiscordInteraction(sessionInteraction("steward"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(restClient.messages[0]?.content).toContain("report-interaction-2");
+    expect(restClient.messages[0]?.content).toContain("report-interaction-1");
+    expect(restClient.messages[1]).toEqual({
+      channelId: "channel-1",
+      content:
+        "Stewarding has started for the incident session in <#channel-1>."
+    });
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-steward",
+        content:
+          "Reporting closed, incident summary posted, and stewarding started."
+      }
+    ]);
+  });
+
+  it("reports stewarding transition posting failures in the deferred response", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
+    restClient.failChannelMessages = true;
+
+    const result = await handleDiscordInteraction(sessionInteraction("steward"), {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+
+    expect(result.body).toMatchObject({ type: 5 });
+
+    await flushWaitUntil();
+
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
+    expect(restClient.messages).toEqual([]);
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-steward",
+        content:
+          "Stewarding started, but I could not post the incident summary. Check the bot can view and send messages in this channel, then run /incident-session summary."
+      }
+    ]);
+  });
+
+  it("edits the deferred response when stewarding cannot start", async () => {
     await seedConfig(repository);
 
     const result = await handleDiscordInteraction(sessionInteraction("steward"), {
-      repository
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
     });
 
-    expect(result.body).toMatchObject({
+    expect(result.body).toEqual({
+      type: 5,
       data: {
-        content: "No incident session is awaiting stewards."
+        flags: DISCORD_EPHEMERAL_MESSAGE_FLAG
       }
     });
+
+    await flushWaitUntil();
+
+    expect(restClient.edits).toEqual([
+      {
+        applicationId: "app-1",
+        interactionToken: "token-steward",
+        content: "There is no reporting incident session to start stewarding."
+      }
+    ]);
   });
 
   it("records a penalty and posts the decision publicly", async () => {
@@ -934,11 +1097,7 @@ describe("Discord interaction handlers", () => {
 
   it("reopens reporting and stewarding through session commands", async () => {
     await seedConfig(repository);
-    const reporting = await seedReportingSession(repository);
-    await repository.endReportingSession({
-      sessionId: reporting.id,
-      endedByUserId: "manager-1"
-    });
+    const reporting = await seedStewardingSession(repository);
 
     const reopenedReporting = await handleDiscordInteraction(
       sessionInteraction("reopen-reporting"),
@@ -982,6 +1141,127 @@ describe("Discord interaction handlers", () => {
 
     expect(reopenedStewarding.body).toMatchObject({
       data: { content: "Stewarding reopened for the latest decided session." }
+    });
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
+  });
+
+  it("rejects reopen-stewarding after a newer reporting session has started", async () => {
+    await seedConfig(repository);
+    const first = await seedStewardingSession(repository);
+    await repository.completeStewardingSession({
+      sessionId: first.id,
+      completedByUserId: "manager-1"
+    });
+    await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-2",
+      startedByUserId: "manager-1"
+    });
+
+    const reopened = await handleDiscordInteraction(
+      sessionInteraction("reopen-stewarding"),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    expect(reopened.body).toMatchObject({
+      data: {
+        content: "No latest decided incident session is available to reopen."
+      }
+    });
+    expect(repository.sessions.map((session) => session.status)).toEqual([
+      "decided",
+      "reporting"
+    ]);
+  });
+
+  it("rejects reopen-stewarding while another session is already stewarding", async () => {
+    await seedConfig(repository);
+    const first = await seedStewardingSession(repository);
+    await repository.completeStewardingSession({
+      sessionId: first.id,
+      completedByUserId: "manager-1"
+    });
+    const second = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-2",
+      startedByUserId: "manager-1"
+    });
+    await repository.endReportingSession({
+      sessionId: second.id,
+      endedByUserId: "manager-1"
+    });
+    await repository.startStewardingSession({
+      sessionId: second.id,
+      startedByUserId: "manager-1"
+    });
+
+    const reopened = await handleDiscordInteraction(
+      sessionInteraction("reopen-stewarding"),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    expect(reopened.body).toMatchObject({
+      data: {
+        content: "An incident session is already being stewarded for this server."
+      }
+    });
+    expect(repository.sessions.map((session) => session.status)).toEqual([
+      "decided",
+      "stewarding"
+    ]);
+  });
+
+  it("rejects reopen-reporting after penalty decisions exist", async () => {
+    await seedConfig(repository);
+    const session = await seedStewardingSession(repository);
+    const report = await repository.insertReport(reportInput(session, "incident-1"));
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Warning",
+      outcome: "Warning",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
+    await repository.upsertPenaltyForIncidentSession({
+      incidentSessionId: session.id,
+      incidentReportId: report.report.id,
+      affectedUserId: "driver-1",
+      penaltyPresetId: preset.id,
+      outcome: preset.outcome,
+      delta: preset.delta,
+      note: null,
+      createdByUserId: "manager-1",
+      updatedByUserId: "manager-1"
+    });
+
+    const result = await handleDiscordInteraction(
+      sessionInteraction("reopen-reporting"),
+      {
+        repository,
+        restClient,
+        waitUntil: captureWaitUntil
+      }
+    );
+
+    await flushWaitUntil();
+
+    expect(result.body).toMatchObject({
+      data: {
+        content:
+          "Reporting cannot be reopened after penalty decisions have been recorded."
+      }
     });
     expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
   });
@@ -1707,6 +1987,7 @@ class MemoryIncidentRepository implements IncidentRepository {
     const report: IncidentReport = {
       id: `report-${this.idNumber++}`,
       ...input,
+      note: input.note ?? null,
       createdAt: this.now++
     };
 
@@ -1813,28 +2094,32 @@ class MemoryIncidentRepository implements IncidentRepository {
     });
   }
 
-  async reopenAwaitingStewardsSessionForReporting(
-    input: ReopenAwaitingStewardsSessionForReportingInput
-  ): Promise<ReopenAwaitingStewardsSessionForReportingResult> {
+  async reopenStewardingSessionForReporting(
+    input: ReopenStewardingSessionForReportingInput
+  ): Promise<ReopenStewardingSessionForReportingResult> {
     const latest = this.getLatestSessionForGuild(input.guildId);
 
-    if (!latest || latest.status !== "awaiting_stewards") {
-      return latest?.status === "stewarding"
-        ? { status: "stewarding_started", session: latest }
-        : { status: "no_awaiting_stewards", session: latest ?? undefined };
+    if (!latest || latest.status !== "stewarding") {
+      return { status: "no_stewarding_session", session: latest ?? undefined };
     }
 
-    const session = await this.updateSession(latest.id, "awaiting_stewards", {
+    if (this.penalties.some((penalty) => penalty.incidentSessionId === latest.id)) {
+      return { status: "penalties_exist", session: latest };
+    }
+
+    const session = await this.updateSession(latest.id, "stewarding", {
       endedByUserId: null,
       endedAt: null,
       status: "reporting",
+      stewardingStartedByUserId: null,
+      stewardingStartedAt: null,
       lastReopenedByUserId: input.reopenedByUserId,
       lastReopenedAt: this.now++
     });
 
     return session
       ? { status: "reopened", session }
-      : { status: "no_awaiting_stewards" };
+      : { status: "no_stewarding_session" };
   }
 
   async reopenDecidedSessionForStewarding(

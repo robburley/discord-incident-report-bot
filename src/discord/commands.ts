@@ -25,18 +25,13 @@ export const incidentCommands = [
         type: ApplicationCommandOptionType.Subcommand
       },
       {
-        name: "end",
-        description: "End reporting and move the session to stewarding prep.",
-        type: ApplicationCommandOptionType.Subcommand
-      },
-      {
         name: "summary",
         description: "Repost the latest incident report summary.",
         type: ApplicationCommandOptionType.Subcommand
       },
       {
         name: "steward",
-        description: "Start stewarding for the latest session awaiting stewards.",
+        description: "Close reporting and start stewarding for the latest session.",
         type: ApplicationCommandOptionType.Subcommand
       },
       {
@@ -90,7 +85,7 @@ export const incidentCommands = [
       },
       {
         name: "reopen-reporting",
-        description: "Reopen the latest session awaiting stewards for reports.",
+        description: "Reopen the latest stewarding session for more reports.",
         type: ApplicationCommandOptionType.Subcommand
       },
       {

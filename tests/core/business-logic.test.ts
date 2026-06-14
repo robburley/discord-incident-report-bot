@@ -7,6 +7,7 @@ import {
 } from "../../src/core/config";
 import {
   createIncidentReport,
+  INCIDENT_REPORT_NOTE_LIMIT,
   validateIncidentReportFields
 } from "../../src/core/incidents";
 import {
@@ -14,7 +15,6 @@ import {
   applyPenalty,
   clearPenaltyForIncident,
   completeStewarding,
-  endIncidentSession,
   getLatestDecisionSummary,
   getLatestIncidentSessionSummary,
   listPenaltyPresets,
@@ -26,6 +26,8 @@ import {
   startStewarding
 } from "../../src/core/sessions";
 import {
+  DISCORD_MESSAGE_LIMIT,
+  formatSplitSessionSummary,
   formatSessionSummary,
   splitDiscordMessage
 } from "../../src/core/summary";
@@ -47,10 +49,10 @@ import type {
   Penalty,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
-  ReopenAwaitingStewardsSessionForReportingInput,
-  ReopenAwaitingStewardsSessionForReportingResult,
   ReopenDecidedSessionForStewardingInput,
   ReopenDecidedSessionForStewardingResult,
+  ReopenStewardingSessionForReportingInput,
+  ReopenStewardingSessionForReportingResult,
   StartStewardingSessionInput,
   UpsertPenaltyInput,
   UpsertPenaltyResult,
@@ -207,7 +209,7 @@ describe("core business logic", () => {
     });
   });
 
-  it("does not start or end sessions without the manager role", async () => {
+  it("does not start sessions or stewarding without the manager role", async () => {
     await seedConfig(repository);
 
     const start = await startIncidentSession({
@@ -217,7 +219,7 @@ describe("core business logic", () => {
       userId: "user-1",
       memberRoleIds: ["driver-role"]
     });
-    const end = await endIncidentSession({
+    const stewarding = await startStewarding({
       repository,
       guildId: "guild-1",
       userId: "user-1",
@@ -225,7 +227,7 @@ describe("core business logic", () => {
     });
 
     expect(start.status).toBe("unauthorized");
-    expect(end.status).toBe("unauthorized");
+    expect(stewarding.status).toBe("unauthorized");
   });
 
   it("allows server admins to perform manager session actions", async () => {
@@ -243,19 +245,22 @@ describe("core business logic", () => {
     expect(start.status).toBe("started");
   });
 
-  it("ends a session and produces an empty public summary", async () => {
+  it("starts stewarding from reporting and produces an empty public summary", async () => {
     await seedConfig(repository);
     await seedReportingSession(repository);
 
-    const result = await endIncidentSession({
+    const result = await startStewarding({
       repository,
       guildId: "guild-1",
       userId: "manager-1",
       memberRoleIds: ["manager-role"]
     });
 
-    expect(result.status).toBe("ended");
-    expect(result.status === "ended" ? result.summaryMessages[0] : "").toContain(
+    expect(result.status).toBe("started");
+    expect(result.status === "started" ? result.session.status : "").toBe(
+      "stewarding"
+    );
+    expect(result.status === "started" ? result.summaryMessages[0] : "").toContain(
       "No incidents were reported."
     );
   });
@@ -274,7 +279,8 @@ describe("core business logic", () => {
         raceNumber: 1,
         lapNumber: 2,
         turnNumber: 3,
-        carNumber: "07_A"
+        carNumber: "07_A",
+        note: null
       }
     });
 
@@ -302,6 +308,59 @@ describe("core business logic", () => {
         carNumber: "1234567890123"
       }).status
     ).toBe("invalid");
+  });
+
+  it("validates and normalizes optional incident report notes", () => {
+    expect(
+      validateIncidentReportFields({
+        raceNumber: "1",
+        lapNumber: "2",
+        turnNumber: "3",
+        carNumber: "07",
+        note: " avoid line breaks \n and `ticks` "
+      })
+    ).toEqual({
+      status: "valid",
+      value: {
+        raceNumber: 1,
+        lapNumber: 2,
+        turnNumber: 3,
+        carNumber: "07",
+        note: "avoid line breaks and 'ticks'"
+      }
+    });
+
+    expect(
+      validateIncidentReportFields({
+        raceNumber: "1",
+        lapNumber: "2",
+        turnNumber: "3",
+        carNumber: "07",
+        note: " \n\t "
+      })
+    ).toEqual({
+      status: "valid",
+      value: {
+        raceNumber: 1,
+        lapNumber: 2,
+        turnNumber: 3,
+        carNumber: "07",
+        note: null
+      }
+    });
+
+    expect(
+      validateIncidentReportFields({
+        raceNumber: "1",
+        lapNumber: "2",
+        turnNumber: "3",
+        carNumber: "07",
+        note: "a".repeat(INCIDENT_REPORT_NOTE_LIMIT + 1)
+      })
+    ).toEqual({
+      status: "invalid",
+      message: `Report note must be ${INCIDENT_REPORT_NOTE_LIMIT} characters or fewer.`
+    });
   });
 
   it("creates incident reports only for a reporting session channel", async () => {
@@ -381,6 +440,30 @@ describe("core business logic", () => {
     expect(repository.reports).toHaveLength(1);
   });
 
+  it("stores a normalized incident report note", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
+
+    const created = await createIncidentReport({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      submittedByUserId: "user-1",
+      discordInteractionId: "interaction-1",
+      raceNumber: "1",
+      lapNumber: "2",
+      turnNumber: "3",
+      carNumber: "07",
+      note: " clipped `track limits` \n on exit "
+    });
+
+    expect(created.status).toBe("created");
+    expect(created.status === "created" ? created.report.note : "").toBe(
+      "clipped 'track limits' on exit"
+    );
+    expect(repository.reports[0]?.note).toBe("clipped 'track limits' on exit");
+  });
+
   it("rejects exact duplicate reports from the same user", async () => {
     await seedConfig(repository);
     await seedReportingSession(repository);
@@ -406,6 +489,39 @@ describe("core business logic", () => {
       lapNumber: "2",
       turnNumber: "3",
       carNumber: "07"
+    });
+
+    expect(duplicate.status).toBe("duplicate_report");
+    expect(repository.reports).toHaveLength(1);
+  });
+
+  it("ignores incident report notes when checking duplicates", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
+
+    await createIncidentReport({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      submittedByUserId: "user-1",
+      discordInteractionId: "interaction-1",
+      raceNumber: "1",
+      lapNumber: "2",
+      turnNumber: "3",
+      carNumber: "07",
+      note: "first note"
+    });
+    const duplicate = await createIncidentReport({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      submittedByUserId: "user-1",
+      discordInteractionId: "interaction-2",
+      raceNumber: "1",
+      lapNumber: "2",
+      turnNumber: "3",
+      carNumber: "07",
+      note: "different note"
     });
 
     expect(duplicate.status).toBe("duplicate_report");
@@ -438,6 +554,46 @@ describe("core business logic", () => {
       "aaaa\nbbbb",
       "cccc"
     ]);
+  });
+
+  it("formats incident summary notes after user mentions and outside table code", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+
+    await repository.insertReport(
+      reportInput(session, "interaction-1", 1, 1, 1, "07", "driver note")
+    );
+    await repository.insertReport(reportInput(session, "interaction-2", 1, 1, 2, "12"));
+
+    const reports = await repository.getOrderedReportsForSession(session.id);
+    const summary = formatSessionSummary({ session, reports });
+
+    expect(summary).toContain(
+      "`1     1    1     07   interaction-1` <@user-1> driver note"
+    );
+    expect(summary).toContain("`1     1    2     12   interaction-2` <@user-1>");
+    expect(summary).not.toContain("interaction-1  driver note`");
+  });
+
+  it("includes incident summary notes when summary messages are split", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    const note = "n".repeat(INCIDENT_REPORT_NOTE_LIMIT);
+
+    for (let index = 0; index < 10; index += 1) {
+      await repository.insertReport(
+        reportInput(session, `interaction-${index + 1}`, 1, 1, index + 1, "07", note)
+      );
+    }
+
+    const reports = await repository.getOrderedReportsForSession(session.id);
+    const messages = formatSplitSessionSummary({ session, reports });
+
+    expect(messages.length).toBeGreaterThan(1);
+    expect(messages.every((message) => message.length <= DISCORD_MESSAGE_LIMIT)).toBe(
+      true
+    );
+    expect(messages.join("\n")).toContain(`<@user-1> ${note}`);
   });
 
   it("rebuilds the latest incident report summary", async () => {
@@ -620,16 +776,16 @@ describe("core business logic", () => {
 
     expect(started.status).toBe("started");
 
-    const ended = await endIncidentSession({
+    const stewarding = await startStewarding({
       repository,
       guildId: "guild-1",
       userId: "manager-1",
       memberRoleIds: ["manager-role"]
     });
 
-    expect(ended.status).toBe("ended");
-    expect(ended.status === "ended" ? ended.session.status : "").toBe(
-      "awaiting_stewards"
+    expect(stewarding.status).toBe("started");
+    expect(stewarding.status === "started" ? stewarding.session.status : "").toBe(
+      "stewarding"
     );
 
     const duplicate = await startIncidentSession({
@@ -639,40 +795,9 @@ describe("core business logic", () => {
       userId: "manager-1",
       memberRoleIds: ["manager-role"]
     });
-    const reopenedReporting = await reopenReporting({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
 
     expect(duplicate.status).toBe("previous_session_not_decided");
-    expect(reopenedReporting.status).toBe("reopened");
-    expect(
-      reopenedReporting.status === "reopened"
-        ? reopenedReporting.session.status
-        : ""
-    ).toBe("reporting");
 
-    await endIncidentSession({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
-
-    const stewarding = await startStewarding({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
-    const cannotReopenReporting = await reopenReporting({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
     const completed = await completeStewarding({
       repository,
       guildId: "guild-1",
@@ -681,11 +806,6 @@ describe("core business logic", () => {
       memberRoleIds: ["manager-role"]
     });
 
-    expect(stewarding.status).toBe("started");
-    expect(stewarding.status === "started" ? stewarding.session.status : "").toBe(
-      "stewarding"
-    );
-    expect(cannotReopenReporting.status).toBe("stewarding_started");
     expect(completed.status).toBe("completed");
     expect(completed.status === "completed" ? completed.session.status : "").toBe(
       "decided"
@@ -709,10 +829,239 @@ describe("core business logic", () => {
     ).toBe("stewarding");
   });
 
-  it("starts stewarding only for awaiting sessions and rejects concurrent stewarding", async () => {
+  it("reopens stewarding when the latest session is decided", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await completeStewarding({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const reopened = await reopenStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-2",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(reopened.status).toBe("reopened");
+    expect(reopened.status === "reopened" ? reopened.session : null).toMatchObject({
+      status: "stewarding",
+      stewardingCompletedByUserId: null,
+      stewardingCompletedAt: null,
+      lastReopenedByUserId: "manager-2"
+    });
+  });
+
+  it("does not reopen stewarding after a newer reporting session has started", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository, "channel-1");
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await completeStewarding({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await startIncidentSession({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-2",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const reopened = await reopenStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-2",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(reopened.status).toBe("no_decided_session");
+    expect("message" in reopened ? reopened.message : "").toBe(
+      "No latest decided incident session is available to reopen."
+    );
+    expect(repository.sessions.map((session) => session.status)).toEqual([
+      "decided",
+      "reporting"
+    ]);
+  });
+
+  it("does not reopen stewarding when another session is already stewarding", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository, "channel-1");
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await completeStewarding({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await startIncidentSession({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-2",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const reopened = await reopenStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-2",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(reopened.status).toBe("already_stewarding");
+    expect("message" in reopened ? reopened.message : "").toBe(
+      "An incident session is already being stewarded for this server."
+    );
+    expect(repository.sessions.map((session) => session.status)).toEqual([
+      "decided",
+      "stewarding"
+    ]);
+  });
+
+  it("reopens reporting from stewarding before penalties and preserves reports", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.insertReport(reportInput(session, "incident-1", 1, 1, 1, "07"));
+    const started = await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const reopened = await reopenReporting({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-2",
+      memberRoleIds: ["manager-role"]
+    });
+    const reports = await repository.getOrderedReportsForSession(session.id);
+
+    expect(started.status).toBe("started");
+    expect(reopened.status).toBe("reopened");
+    expect(reopened.status === "reopened" ? reopened.session : null).toMatchObject({
+      status: "reporting",
+      endedByUserId: null,
+      endedAt: null,
+      stewardingStartedByUserId: null,
+      stewardingStartedAt: null,
+      lastReopenedByUserId: "manager-2"
+    });
+    expect(reports.map((report) => report.discordInteractionId)).toEqual([
+      "incident-1"
+    ]);
+  });
+
+  it("does not reopen reporting from stewarding after a penalty exists", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.insertReport(reportInput(session, "incident-1", 1, 1, 1, "07"));
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    const preset = await addPenaltyPreset({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      name: "Warning",
+      outcome: "Warning",
+      delta: null
+    });
+    await applyPenalty({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"],
+      incidentId: "incident-1",
+      affectedUserId: "driver-1",
+      penaltyPreset: preset.status === "added" ? preset.preset.id : "missing"
+    });
+
+    const reopened = await reopenReporting({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-2",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(reopened.status).toBe("penalties_exist");
+    expect("message" in reopened ? reopened.message : "").toBe(
+      "Reporting cannot be reopened after penalty decisions have been recorded."
+    );
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
+  });
+
+  it("does not reopen reporting from decided sessions", async () => {
+    await seedConfig(repository);
+    await seedReportingSession(repository);
+    await startStewarding({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+    await completeStewarding({
+      repository,
+      guildId: "guild-1",
+      channelId: "channel-1",
+      userId: "manager-1",
+      memberRoleIds: ["manager-role"]
+    });
+
+    const reopened = await reopenReporting({
+      repository,
+      guildId: "guild-1",
+      userId: "manager-2",
+      memberRoleIds: ["manager-role"]
+    });
+
+    expect(reopened.status).toBe("no_stewarding_session");
+    expect("message" in reopened ? reopened.message : "").toBe(
+      "There is no latest stewarding incident session available to reopen for reporting."
+    );
+  });
+
+  it("starts stewarding only for reporting sessions and rejects concurrent stewarding", async () => {
     await seedConfig(repository);
 
-    const noAwaiting = await startStewarding({
+    const noReporting = await startStewarding({
       repository,
       guildId: "guild-1",
       userId: "manager-1",
@@ -720,12 +1069,6 @@ describe("core business logic", () => {
     });
 
     await seedReportingSession(repository, "channel-1");
-    await endIncidentSession({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
 
     const first = await startStewarding({
       repository,
@@ -740,7 +1083,7 @@ describe("core business logic", () => {
       memberRoleIds: ["manager-role"]
     });
 
-    expect(noAwaiting.status).toBe("no_awaiting_stewards");
+    expect(noReporting.status).toBe("no_reporting_session");
     expect(first.status).toBe("started");
     expect(second.status).toBe("already_stewarding");
   });
@@ -838,12 +1181,6 @@ describe("core business logic", () => {
     await seedConfig(repository);
     const session = await seedReportingSession(repository);
     await repository.insertReport(reportInput(session, "incident-1", 1, 2, 3, "07"));
-    await endIncidentSession({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
     await startStewarding({
       repository,
       guildId: "guild-1",
@@ -958,12 +1295,6 @@ describe("core business logic", () => {
     await seedConfig(repository);
     const session = await seedReportingSession(repository);
     await repository.insertReport(reportInput(session, "incident-1", 1, 1, 1, "07"));
-    await endIncidentSession({
-      repository,
-      guildId: "guild-1",
-      userId: "manager-1",
-      memberRoleIds: ["manager-role"]
-    });
     await startStewarding({
       repository,
       guildId: "guild-1",
@@ -1085,9 +1416,10 @@ function reportInput(
   raceNumber: number,
   lapNumber: number,
   turnNumber: number,
-  carNumber: string
+  carNumber: string,
+  note?: string | null
 ): InsertReportInput {
-  return {
+  const input: InsertReportInput = {
     sessionId: session.id,
     guildId: session.guildId,
     submittedByUserId: "user-1",
@@ -1097,6 +1429,8 @@ function reportInput(
     turnNumber,
     carNumber
   };
+
+  return note === undefined ? input : { ...input, note };
 }
 
 class MemoryIncidentRepository implements IncidentRepository {
@@ -1207,6 +1541,7 @@ class MemoryIncidentRepository implements IncidentRepository {
     const report: IncidentReport = {
       id: `report-${this.idNumber++}`,
       ...input,
+      note: input.note ?? null,
       createdAt: this.now++
     };
 
@@ -1313,28 +1648,32 @@ class MemoryIncidentRepository implements IncidentRepository {
     });
   }
 
-  async reopenAwaitingStewardsSessionForReporting(
-    input: ReopenAwaitingStewardsSessionForReportingInput
-  ): Promise<ReopenAwaitingStewardsSessionForReportingResult> {
+  async reopenStewardingSessionForReporting(
+    input: ReopenStewardingSessionForReportingInput
+  ): Promise<ReopenStewardingSessionForReportingResult> {
     const latest = this.getLatestSessionForGuild(input.guildId);
 
-    if (!latest || latest.status !== "awaiting_stewards") {
-      return latest?.status === "stewarding"
-        ? { status: "stewarding_started", session: latest }
-        : { status: "no_awaiting_stewards", session: latest ?? undefined };
+    if (!latest || latest.status !== "stewarding") {
+      return { status: "no_stewarding_session", session: latest ?? undefined };
     }
 
-    const session = await this.updateSession(latest.id, "awaiting_stewards", {
+    if (this.penalties.some((penalty) => penalty.incidentSessionId === latest.id)) {
+      return { status: "penalties_exist", session: latest };
+    }
+
+    const session = await this.updateSession(latest.id, "stewarding", {
       endedByUserId: null,
       endedAt: null,
       status: "reporting",
+      stewardingStartedByUserId: null,
+      stewardingStartedAt: null,
       lastReopenedByUserId: input.reopenedByUserId,
       lastReopenedAt: this.now++
     });
 
     return session
       ? { status: "reopened", session }
-      : { status: "no_awaiting_stewards" };
+      : { status: "no_stewarding_session" };
   }
 
   async reopenDecidedSessionForStewarding(

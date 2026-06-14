@@ -161,7 +161,7 @@ After install, each server must be configured by an admin:
 /incident-config role role:<manager role>
 ```
 
-That role controls who can start and end incident sessions. Until this setup is
+That role controls who can manage incident sessions. Until this setup is
 complete, incident commands are intentionally blocked for that server.
 
 Admins can verify server setup with:
@@ -197,34 +197,33 @@ Integrations command permissions.
 Incident sessions move through this status flow:
 
 ```text
-reporting -> awaiting_stewards -> stewarding -> decided
+reporting -> stewarding -> decided
 ```
 
 Managers can reverse only the latest session in two controlled cases:
 
 ```text
-awaiting_stewards -> reporting
+stewarding -> reporting, before penalties are recorded
 decided -> stewarding
 ```
 
 Use `/incident-session start` in the incident channel to open reporting. Drivers
 can use `/incident` only while the latest session is in `reporting`, and reports
-must be submitted in that session's channel. A new reporting session cannot
-start until the previous latest session is `decided`.
+must be submitted in that session's channel. Reports can include an optional
+short note for extra context; notes appear after the submitting driver in the
+incident summary. A new reporting session cannot start until the previous
+latest session is `decided`.
 
-Use `/incident-session end` to close reporting. This moves the session to
-`awaiting_stewards` and posts the incident report summary in the original
-session channel. Managers can use `/incident-session summary` to repost that
-incident list later. This summary is the report list, not the stewarding
-decision summary.
+Use `/incident-session steward` to close reporting, post the incident report
+summary in the original session channel, and start stewarding. Managers can use
+`/incident-session summary` to repost that incident list later. This summary is
+the report list, not the stewarding decision summary.
 
-If reporting was ended too early, use `/incident-session reopen-reporting`.
-This only works when the latest session is still `awaiting_stewards`; once
-stewarding has started, reporting cannot be reopened.
-
-Use `/incident-session steward` to move the latest `awaiting_stewards` session
-to `stewarding`. Stewarding decisions are then recorded in the same original
-session channel.
+If stewarding was started too early, use
+`/incident-session reopen-reporting`. This only works when the latest session
+is `stewarding` and no penalties have been recorded for that session.
+Reopening preserves existing reports and allows more `/incident` submissions in
+the original session channel.
 
 Use `/incident-session complete` to move the stewarding session to `decided`
 and post the final decision summary. Managers can use
@@ -283,8 +282,8 @@ the visible session state are posted publicly in the original session channel.
 These commands post public channel messages:
 
 - `/incident-session start`: reporting started.
-- `/incident-session end`: one or more incident report summary messages.
-- `/incident-session steward`: stewarding started.
+- `/incident-session steward`: one or more incident report summary messages,
+  plus stewarding started.
 - `/incident-session penalty`: recorded or updated penalty decision, including
   affected driver mention and outcome.
 - `/incident-session penalty-clear`: cleared decision notice when decisions were
@@ -309,12 +308,13 @@ These commands reply ephemerally only:
 succeeds. Live DM behavior must be smoke tested because user privacy settings,
 bot install state, or the bot/user relationship can block DM delivery.
 
-`/incident-session end`, `/incident-session complete`,
+`/incident-session steward`, `/incident-session complete`,
 `/incident-session summary`, and `/incident-session decisions` defer the
-ephemeral response while posting summary messages. If posting fails, fix the
-bot's channel permissions or token configuration, then rerun
-`/incident-session summary` for report lists or `/incident-session decisions`
-for stewarding decisions.
+ephemeral response while posting summary messages. If report-list posting fails
+after stewarding starts, fix the bot's channel permissions or token
+configuration, then rerun `/incident-session summary`. If decision-summary
+posting fails after completion, fix the same posting issue and rerun
+`/incident-session decisions`.
 
 Second test server checklist:
 
@@ -470,8 +470,8 @@ To rotate `DISCORD_BOT_TOKEN`:
    `npm run secrets:set:discord-bot-token`.
 3. Redeploy if your Cloudflare setup does not make secret updates available to
    the active Worker version automatically.
-4. Re-run a short smoke test that starts and ends a session, because posting
-   session messages and summaries depends on the bot token.
+4. Re-run a short smoke test that starts a session and moves it to stewarding,
+   because posting session messages and summaries depends on the bot token.
 5. Update any local `.dev.vars` or CI secret stores that are intentionally used
    for command registration.
 
@@ -519,13 +519,14 @@ The bot stores only the Discord data needed to operate incident sessions:
 
 - Guild/server IDs.
 - Channel IDs for incident sessions.
-- User IDs for session starters, session enders, and incident submitters.
+- User IDs for session starters, users who closed reporting, and incident
+  submitters.
 - Role IDs for configured incident manager roles.
 - Incident session status and timestamps.
 - Stewarding audit user IDs and timestamps for session start, completion, and
   reopen actions.
 - Incident report details submitted through the modal: race number, lap number,
-  turn number, and car number.
+  turn number, car number, and optional note.
 - Penalty preset names, outcomes, optional numeric deltas, and soft-delete
   status.
 - Penalty decisions, affected user IDs, optional notes, copied preset deltas,
@@ -579,26 +580,29 @@ Run a live stewarding smoke test in the test guild:
 6. Try to start a second session before the first is decided and confirm it is
    rejected.
 7. Configure at least two penalty presets with `/incident-config penalty-add`.
-8. End reporting with `/incident-session end` and confirm the incident list
-   posts.
-9. Reopen to reporting with `/incident-session reopen-reporting`, submit
-   another report, then end reporting again.
-10. Start stewarding with `/incident-session steward`.
+8. Submit at least one report with an optional note and confirm the note appears
+   after the submitting driver in the incident list later.
+9. Close reporting with `/incident-session steward` and confirm the incident
+   list posts before stewarding starts.
+10. Reopen to reporting with `/incident-session reopen-reporting`, submit
+    another report, then run `/incident-session steward` again.
 11. Add one or more penalties with `/incident-session penalty`, using
     autocomplete for the preset and selecting an affected user.
 12. Update one penalty for the same incident and affected user.
 13. Add a penalty note.
-14. Clear penalties for one incident with `/incident-session penalty-clear`.
-15. Remove a used preset with `/incident-config penalty-remove` and confirm it
+14. Confirm `/incident-session reopen-reporting` is rejected after a penalty has
+    been applied.
+15. Clear penalties for one incident with `/incident-session penalty-clear`.
+16. Remove a used preset with `/incident-config penalty-remove` and confirm it
     disappears from `/incident-config penalties` and autocomplete.
-16. Complete stewarding with `/incident-session complete`.
-17. Reopen stewarding with `/incident-session reopen-stewarding`.
-18. Update a penalty, then complete stewarding again.
-19. Confirm the final decision summary contains only incidents with outcomes.
-20. Repost decisions with `/incident-session decisions`.
+17. Complete stewarding with `/incident-session complete`.
+18. Reopen stewarding with `/incident-session reopen-stewarding`.
+19. Update a penalty, then complete stewarding again.
+20. Confirm the final decision summary contains only incidents with outcomes.
+21. Repost decisions with `/incident-session decisions`.
 
-If incident-list posting fails after reporting ends, fix Discord permissions or
-token configuration and use `/incident-session summary` to repost the latest
+If incident-list posting fails after stewarding starts, fix Discord permissions
+or token configuration and use `/incident-session summary` to repost the latest
 report list. If decision-summary posting fails after stewarding completes, fix
 the same posting issue and use `/incident-session decisions` to repost the
 latest stewarding decisions.

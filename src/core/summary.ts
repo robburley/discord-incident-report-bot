@@ -50,7 +50,8 @@ function formatIncidentTable(reports: readonly IncidentReport[]): string[] {
       report.carNumber,
       report.discordInteractionId
     ],
-    userMention: `<@${report.submittedByUserId}>`
+    userMention: `<@${report.submittedByUserId}>`,
+    note: report.note ? normalizeDiscordTableCell(report.note) : null
   }));
   const widths = SUMMARY_TABLE_HEADERS.map((header, columnIndex) =>
     Math.max(
@@ -66,7 +67,10 @@ function formatIncidentTable(reports: readonly IncidentReport[]): string[] {
   return [
     `\`${formatCells(SUMMARY_TABLE_HEADERS)}\``,
     ...rows.map(
-      (row) => `\`${formatCells(row.cells)}\` ${row.userMention}`
+      (row) =>
+        `\`${formatCells(row.cells)}\` ${row.userMention}${
+          row.note ? ` ${row.note}` : ""
+        }`
     )
   ];
 }

@@ -56,6 +56,7 @@ CREATE TABLE incident_reports (
   lap_number integer NOT NULL,
   turn_number integer NOT NULL,
   car_number text NOT NULL,
+  note text,
   created_at integer NOT NULL
 );
 
@@ -403,7 +404,7 @@ describe("DrizzleIncidentRepository", () => {
     });
   });
 
-  it("reopens only latest awaiting-stewards sessions to reporting", async () => {
+  it("does not reopen an older decided session after a newer reporting session starts", async () => {
     const first = await repository.createReportingSession({
       guildId: "guild-1",
       channelId: "channel-1",
@@ -413,8 +414,100 @@ describe("DrizzleIncidentRepository", () => {
       sessionId: first.id,
       endedByUserId: "manager-1"
     });
+    await repository.startStewardingSession({
+      sessionId: first.id,
+      startedByUserId: "steward-1"
+    });
+    await repository.completeStewardingSession({
+      sessionId: first.id,
+      completedByUserId: "steward-2"
+    });
 
-    const reopened = await repository.reopenAwaitingStewardsSessionForReporting({
+    const second = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-2",
+      startedByUserId: "manager-2"
+    });
+
+    await expect(
+      repository.reopenDecidedSessionForStewarding({
+        guildId: "guild-1",
+        reopenedByUserId: "manager-3"
+      })
+    ).resolves.toMatchObject({
+      status: "no_decided_session",
+      session: {
+        id: second.id,
+        status: "reporting"
+      }
+    });
+  });
+
+  it("does not reopen an older decided session while a newer session is stewarding", async () => {
+    const first = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-1",
+      startedByUserId: "manager-1"
+    });
+    await repository.endReportingSession({
+      sessionId: first.id,
+      endedByUserId: "manager-1"
+    });
+    await repository.startStewardingSession({
+      sessionId: first.id,
+      startedByUserId: "steward-1"
+    });
+    await repository.completeStewardingSession({
+      sessionId: first.id,
+      completedByUserId: "steward-2"
+    });
+
+    const second = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-2",
+      startedByUserId: "manager-2"
+    });
+    await repository.endReportingSession({
+      sessionId: second.id,
+      endedByUserId: "manager-2"
+    });
+    const stewarding = await repository.startStewardingSession({
+      sessionId: second.id,
+      startedByUserId: "steward-3"
+    });
+    expect(stewarding).not.toBeNull();
+
+    await expect(
+      repository.reopenDecidedSessionForStewarding({
+        guildId: "guild-1",
+        reopenedByUserId: "manager-3"
+      })
+    ).resolves.toMatchObject({
+      status: "already_stewarding",
+      session: {
+        id: stewarding!.id,
+        status: "stewarding"
+      }
+    });
+  });
+
+  it("reopens latest stewarding sessions to reporting before penalties exist", async () => {
+    const first = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-1",
+      startedByUserId: "manager-1"
+    });
+    await repository.endReportingSession({
+      sessionId: first.id,
+      endedByUserId: "manager-1"
+    });
+    await repository.startStewardingSession({
+      sessionId: first.id,
+      startedByUserId: "steward-1"
+    });
+    await repository.insertReport(reportInput(first.id, "i-1", 1, 1, 1, "07"));
+
+    const reopened = await repository.reopenStewardingSessionForReporting({
       guildId: "guild-1",
       reopenedByUserId: "manager-2"
     });
@@ -425,25 +518,59 @@ describe("DrizzleIncidentRepository", () => {
         status: "reporting",
         endedByUserId: null,
         endedAt: null,
+        stewardingStartedByUserId: null,
+        stewardingStartedAt: null,
         lastReopenedByUserId: "manager-2"
       }
     });
+    await expect(repository.getOrderedReportsForSession(first.id)).resolves.toHaveLength(
+      1
+    );
+  });
+
+  it("does not reopen reporting when latest stewarding session has penalties", async () => {
+    const session = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-1",
+      startedByUserId: "manager-1"
+    });
+    const report = await repository.insertReport(
+      reportInput(session.id, "i-1", 1, 1, 1, "07")
+    );
+    const preset = await repository.createPenaltyPreset({
+      guildId: "guild-1",
+      name: "Warning",
+      outcome: "Warning",
+      delta: null,
+      createdByUserId: "manager-1"
+    });
 
     await repository.endReportingSession({
-      sessionId: first.id,
+      sessionId: session.id,
       endedByUserId: "manager-1"
     });
     await repository.startStewardingSession({
-      sessionId: first.id,
+      sessionId: session.id,
       startedByUserId: "steward-1"
+    });
+    await repository.upsertPenaltyForIncidentSession({
+      incidentSessionId: session.id,
+      incidentReportId: report.report.id,
+      affectedUserId: "driver-1",
+      penaltyPresetId: preset.id,
+      outcome: preset.outcome,
+      delta: preset.delta,
+      note: null,
+      createdByUserId: "manager-1",
+      updatedByUserId: "manager-1"
     });
 
     await expect(
-      repository.reopenAwaitingStewardsSessionForReporting({
+      repository.reopenStewardingSessionForReporting({
         guildId: "guild-1",
         reopenedByUserId: "manager-2"
       })
-    ).resolves.toMatchObject({ status: "stewarding_started" });
+    ).resolves.toMatchObject({ status: "penalties_exist" });
   });
 
   it("sorts reports by race, lap, turn, then creation time", async () => {
@@ -511,6 +638,32 @@ describe("DrizzleIncidentRepository", () => {
 
     expect(first.report.carNumber).toBe("07");
     expect(second.report.carNumber).toBe("12A");
+  });
+
+  it("inserts and reads optional report notes", async () => {
+    const session = await repository.createReportingSession({
+      guildId: "guild-1",
+      channelId: "channel-1",
+      startedByUserId: "manager-1"
+    });
+
+    const withNote = await repository.insertReport({
+      ...reportInput(session.id, "i-1", 1, 1, 1, "07"),
+      note: "Driver said the car rejoined unsafely"
+    });
+    const withoutNote = await repository.insertReport(
+      reportInput(session.id, "i-2", 1, 1, 2, "12")
+    );
+
+    expect(withNote.report.note).toBe("Driver said the car rejoined unsafely");
+    expect(withoutNote.report.note).toBeNull();
+    await expect(repository.getReportByDiscordInteractionId("i-1")).resolves.toEqual(
+      withNote.report
+    );
+    await expect(repository.getOrderedReportsForSession(session.id)).resolves.toEqual([
+      withNote.report,
+      withoutNote.report
+    ]);
   });
 
   it("makes duplicate modal interaction IDs idempotent", async () => {

@@ -24,10 +24,10 @@ import type {
   InsertReportResult,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
-  ReopenAwaitingStewardsSessionForReportingInput,
-  ReopenAwaitingStewardsSessionForReportingResult,
   ReopenDecidedSessionForStewardingInput,
   ReopenDecidedSessionForStewardingResult,
+  ReopenStewardingSessionForReportingInput,
+  ReopenStewardingSessionForReportingResult,
   StartStewardingSessionInput,
   UpsertPenaltyInput,
   UpsertPenaltyResult,
@@ -186,6 +186,7 @@ export class DrizzleIncidentRepository implements IncidentRepository {
         lapNumber: input.lapNumber,
         turnNumber: input.turnNumber,
         carNumber: input.carNumber,
+        note: input.note ?? null,
         createdAt: this.now()
       })
       .returning();
@@ -328,22 +329,28 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     return (row as IncidentSession | undefined) ?? null;
   }
 
-  async reopenAwaitingStewardsSessionForReporting(
-    input: ReopenAwaitingStewardsSessionForReportingInput
-  ): Promise<ReopenAwaitingStewardsSessionForReportingResult> {
+  async reopenStewardingSessionForReporting(
+    input: ReopenStewardingSessionForReportingInput
+  ): Promise<ReopenStewardingSessionForReportingResult> {
     const latestSession = await this.getLatestSessionForGuild(input.guildId);
 
-    if (!latestSession || latestSession.status !== "awaiting_stewards") {
-      if (latestSession?.status === "stewarding") {
-        return {
-          status: "stewarding_started",
-          session: latestSession
-        };
-      }
-
+    if (!latestSession || latestSession.status !== "stewarding") {
       return {
-        status: "no_awaiting_stewards",
+        status: "no_stewarding_session",
         session: latestSession ?? undefined
+      };
+    }
+
+    const [existingPenalty] = await this.db
+      .select({ id: penalties.id })
+      .from(penalties)
+      .where(eq(penalties.incidentSessionId, latestSession.id))
+      .limit(1);
+
+    if (existingPenalty) {
+      return {
+        status: "penalties_exist",
+        session: latestSession
       };
     }
 
@@ -353,13 +360,15 @@ export class DrizzleIncidentRepository implements IncidentRepository {
         endedByUserId: null,
         endedAt: null,
         status: "reporting",
+        stewardingStartedByUserId: null,
+        stewardingStartedAt: null,
         lastReopenedByUserId: input.reopenedByUserId,
         lastReopenedAt: this.now()
       })
       .where(
         and(
           eq(incidentSessions.id, latestSession.id),
-          eq(incidentSessions.status, "awaiting_stewards")
+          eq(incidentSessions.status, "stewarding")
         )
       )
       .returning();
@@ -367,7 +376,7 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     const session = row as IncidentSession | undefined;
 
     if (!session) {
-      return { status: "no_awaiting_stewards" };
+      return { status: "no_stewarding_session" };
     }
 
     return { status: "reopened", session };

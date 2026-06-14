@@ -28,23 +28,17 @@ Start reporting in the channel where reports should be collected:
 ```
 
 Drivers can submit `/incident` only while reporting is open, and only in the
-active reporting channel.
+active reporting channel. Reports can include an optional short note for extra
+context; notes appear after the submitting driver in the incident list.
 
-End reporting with:
-
-```text
-/incident-session end
-```
-
-The bot posts a public incident list in the original session channel. Use the
-incident IDs from that list when making penalty decisions.
-
-If reporting ended too early, use `/incident-session reopen-reporting` before
-stewarding starts. Once stewarding has started, reporting cannot be reopened.
+When reporting is ready to close, start stewarding with
+`/incident-session steward`. The bot closes reporting and posts a public
+incident list in the original session channel. Use the incident IDs from that
+list when making penalty decisions.
 
 ## Stewarding
 
-Start stewarding for the latest session awaiting stewards:
+Close reporting and start stewarding for the latest reporting session:
 
 ```text
 /incident-session steward
@@ -52,6 +46,11 @@ Start stewarding for the latest session awaiting stewards:
 
 Stewarding decisions are recorded against the original incident session. Use
 `/incident-session summary` if you need to repost the incident list.
+
+If stewarding was started too early and no penalties have been recorded yet, use
+`/incident-session reopen-reporting` to reopen reporting. Existing reports stay
+attached to the session so drivers can add any missing reports in the original
+channel.
 
 Complete stewarding with:
 
@@ -63,8 +62,8 @@ The bot posts a final public decision summary. Use `/incident-session decisions`
 to repost the latest decision summary if needed.
 
 If decisions need correction after completion, use
-`/incident-session reopen-stewarding`, update the decisions, then complete
-stewarding again.
+`/incident-session reopen-stewarding` on the latest decided session, update the
+decisions, then complete stewarding again.
 
 ## Penalty Presets
 

@@ -13,7 +13,6 @@ import {
   applyPenalty,
   clearPenaltyForIncident,
   completeStewarding,
-  endIncidentSession,
   getLatestDecisionSummary,
   getLatestIncidentSessionSummary,
   listPenaltyPresets,
@@ -35,6 +34,7 @@ import {
   CAR_NUMBER_INPUT_ID,
   INCIDENT_REPORT_MODAL_CUSTOM_ID,
   LAP_NUMBER_INPUT_ID,
+  NOTE_INPUT_ID,
   RACE_NUMBER_INPUT_ID,
   TURN_NUMBER_INPUT_ID,
   incidentReportModalResponse
@@ -452,50 +452,6 @@ async function handleSessionCommand(
     return ok(ephemeralDiscordMessage("Incident session started."));
   }
 
-  if (subcommand?.name === "end") {
-    const deferredContext = getDeferredInteractionContext(interaction);
-
-    if (!deferredContext) {
-      return ok(ephemeralDiscordMessage("Malformed Discord interaction token."));
-    }
-
-    scheduleSummaryAction(dependencies, async () => {
-      const result = await endIncidentSession({
-        repository,
-        guildId: context.guildId,
-        userId: context.userId,
-        memberRoleIds: context.memberRoleIds,
-        canManageGuild: context.canManageGuild
-      });
-
-      if (result.status !== "ended") {
-        console.error({
-          event: "incident_session_end_failed",
-          guildId: context.guildId,
-          channelId: context.channelId,
-          status: result.status
-        });
-        await editDeferredResponse(dependencies, {
-          ...deferredContext,
-          content: result.message
-        });
-        return;
-      }
-
-      const posted = await postSummaryMessages(dependencies, result.session.channelId, [
-        ...result.summaryMessages
-      ]);
-      await editDeferredResponse(dependencies, {
-        ...deferredContext,
-        content: posted
-          ? "Incident session ended and summary posted."
-          : "Incident session ended, but I could not post the summary. Check the bot can view and send messages in this channel, then run `/incident-session summary`."
-      });
-    });
-
-    return ok(deferredEphemeralDiscordMessage());
-  }
-
   if (subcommand?.name === "summary") {
     const deferredContext = getDeferredInteractionContext(interaction);
 
@@ -541,27 +497,52 @@ async function handleSessionCommand(
   }
 
   if (subcommand?.name === "steward") {
-    const result = await startStewarding({
-      repository,
-      guildId: context.guildId,
-      userId: context.userId,
-      memberRoleIds: context.memberRoleIds,
-      canManageGuild: context.canManageGuild
-    });
+    const deferredContext = getDeferredInteractionContext(interaction);
 
-    if (result.status !== "started") {
-      return ok(ephemeralDiscordMessage(result.message));
+    if (!deferredContext) {
+      return ok(ephemeralDiscordMessage("Malformed Discord interaction token."));
     }
 
-    scheduleChannelPosts(dependencies, result.session.channelId, [
-      `Stewarding has started for the incident session in <#${result.session.channelId}>.`
-    ]);
+    scheduleSummaryAction(dependencies, async () => {
+      const result = await startStewarding({
+        repository,
+        guildId: context.guildId,
+        userId: context.userId,
+        memberRoleIds: context.memberRoleIds,
+        canManageGuild: context.canManageGuild
+      });
 
-    return ok(
-      ephemeralDiscordMessage(
-        "Stewarding started for the latest session awaiting stewards."
-      )
-    );
+      if (result.status !== "started") {
+        console.error({
+          event: "incident_session_steward_failed",
+          guildId: context.guildId,
+          channelId: context.channelId,
+          status: result.status
+        });
+        await editDeferredResponse(dependencies, {
+          ...deferredContext,
+          content: result.message
+        });
+        return;
+      }
+
+      const posted = await postSummaryMessages(
+        dependencies,
+        result.session.channelId,
+        [
+          ...result.summaryMessages,
+          `Stewarding has started for the incident session in <#${result.session.channelId}>.`
+        ]
+      );
+      await editDeferredResponse(dependencies, {
+        ...deferredContext,
+        content: posted
+          ? "Reporting closed, incident summary posted, and stewarding started."
+          : "Stewarding started, but I could not post the incident summary. Check the bot can view and send messages in this channel, then run /incident-session summary."
+      });
+    });
+
+    return ok(deferredEphemeralDiscordMessage());
   }
 
   if (subcommand?.name === "penalty") {
@@ -855,19 +836,15 @@ async function handleModalSubmit(
     raceNumber: values.get(RACE_NUMBER_INPUT_ID),
     lapNumber: values.get(LAP_NUMBER_INPUT_ID),
     turnNumber: values.get(TURN_NUMBER_INPUT_ID),
-    carNumber: values.get(CAR_NUMBER_INPUT_ID)
+    carNumber: values.get(CAR_NUMBER_INPUT_ID),
+    note: values.get(NOTE_INPUT_ID)
   });
 
   if (result.status === "created") {
     try {
       await dependencies.restClient?.createChannelMessage({
         channelId: context.channelId,
-        content: `An incident report has been submitted by <@${context.userId}>.
-Details:
-Race Number: ${values.get(RACE_NUMBER_INPUT_ID)}
-Lap Number: ${values.get(LAP_NUMBER_INPUT_ID)}
-Turn / Corner Number: ${values.get(TURN_NUMBER_INPUT_ID)}
-Car Number: ${values.get(CAR_NUMBER_INPUT_ID)}`,
+        content: incidentReportSubmittedMessage(context.userId, result.report)
       });
     } catch (error) {
       console.error({
@@ -996,6 +973,32 @@ function penaltyMessage(
   const base = `Penalty ${action} for <@${input.affectedUserId}> on incident ${input.incidentId}: ${input.outcome}.`;
 
   return input.note ? `${base} Note: ${input.note}` : base;
+}
+
+function incidentReportSubmittedMessage(
+  userId: string,
+  report: {
+    readonly raceNumber: number;
+    readonly lapNumber: number;
+    readonly turnNumber: number;
+    readonly carNumber: string;
+    readonly note: string | null;
+  }
+): string {
+  const lines = [
+    `An incident report has been submitted by <@${userId}>.`,
+    "Details:",
+    `Race Number: ${report.raceNumber}`,
+    `Lap Number: ${report.lapNumber}`,
+    `Turn / Corner Number: ${report.turnNumber}`,
+    `Car Number: ${report.carNumber}`
+  ];
+
+  if (report.note) {
+    lines.push(`Note: ${report.note}`);
+  }
+
+  return lines.join("\n");
 }
 
 function formatPenaltyPresetListMessage(

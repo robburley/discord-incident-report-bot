@@ -80,13 +80,14 @@ export type StartStewardingResult =
   | {
       readonly status: "started";
       readonly session: IncidentSession;
+      readonly summaryMessages: readonly string[];
     }
   | {
       readonly status:
         | "guild_not_configured"
         | "unauthorized"
         | "already_stewarding"
-        | "no_awaiting_stewards";
+        | "no_reporting_session";
       readonly message: string;
       readonly session?: IncidentSession;
     };
@@ -153,8 +154,8 @@ export type ReopenReportingResult =
       readonly status:
         | "guild_not_configured"
         | "unauthorized"
-        | "no_awaiting_stewards"
-        | "stewarding_started";
+        | "no_stewarding_session"
+        | "penalties_exist";
       readonly message: string;
       readonly session?: IncidentSession;
     };
@@ -405,13 +406,26 @@ export async function startStewarding(
     };
   }
 
-  const awaiting =
-    await input.repository.getLatestSessionAwaitingStewardsForGuild(input.guildId);
+  const reportingSession = await input.repository.getReportingSessionForGuild(
+    input.guildId
+  );
+
+  if (!reportingSession) {
+    return {
+      status: "no_reporting_session",
+      message: "There is no reporting incident session to start stewarding."
+    };
+  }
+
+  const awaiting = await input.repository.endReportingSession({
+    sessionId: reportingSession.id,
+    endedByUserId: input.userId
+  });
 
   if (!awaiting) {
     return {
-      status: "no_awaiting_stewards",
-      message: "No incident session is awaiting stewards."
+      status: "no_reporting_session",
+      message: "There is no reporting incident session to start stewarding."
     };
   }
 
@@ -422,14 +436,17 @@ export async function startStewarding(
 
   if (!session) {
     return {
-      status: "no_awaiting_stewards",
-      message: "No incident session is awaiting stewards."
+      status: "no_reporting_session",
+      message: "There is no reporting incident session to start stewarding."
     };
   }
 
+  const reports = await input.repository.getOrderedReportsForSession(session.id);
+
   return {
     status: "started",
-    session
+    session,
+    summaryMessages: formatSplitSessionSummary({ session, reports })
   };
 }
 
@@ -580,7 +597,7 @@ export async function reopenReporting(
     return auth;
   }
 
-  const result = await input.repository.reopenAwaitingStewardsSessionForReporting({
+  const result = await input.repository.reopenStewardingSessionForReporting({
     guildId: input.guildId,
     reopenedByUserId: input.userId
   });
@@ -589,17 +606,19 @@ export async function reopenReporting(
     return result;
   }
 
-  if (result.status === "stewarding_started") {
+  if (result.status === "penalties_exist") {
     return {
-      status: "stewarding_started",
-      message: "Reporting cannot be reopened after stewarding has started.",
+      status: "penalties_exist",
+      message:
+        "Reporting cannot be reopened after penalty decisions have been recorded.",
       ...(result.session ? { session: result.session } : {})
     };
   }
 
   return {
-    status: "no_awaiting_stewards",
-    message: "No incident session is awaiting stewards.",
+    status: "no_stewarding_session",
+    message:
+      "There is no latest stewarding incident session available to reopen for reporting.",
     ...(result.session ? { session: result.session } : {})
   };
 }
@@ -632,7 +651,7 @@ export async function reopenStewarding(
 
   return {
     status: "no_decided_session",
-    message: "No decided incident session is available to reopen.",
+    message: "No latest decided incident session is available to reopen.",
     ...(result.session ? { session: result.session } : {})
   };
 }

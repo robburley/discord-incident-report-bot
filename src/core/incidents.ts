@@ -6,11 +6,14 @@ import { INCIDENT_SETUP_MESSAGE } from "./config";
 
 const CAR_NUMBER_PATTERN = /^[A-Za-z0-9_-]{1,12}$/;
 
+export const INCIDENT_REPORT_NOTE_LIMIT = 200;
+
 export interface IncidentReportFields {
   readonly raceNumber: unknown;
   readonly lapNumber: unknown;
   readonly turnNumber: unknown;
   readonly carNumber: unknown;
+  readonly note?: unknown;
 }
 
 export interface ValidatedIncidentReportFields {
@@ -18,6 +21,7 @@ export interface ValidatedIncidentReportFields {
   readonly lapNumber: number;
   readonly turnNumber: number;
   readonly carNumber: string;
+  readonly note: string | null;
 }
 
 export type IncidentReportValidationResult =
@@ -86,13 +90,32 @@ export function validateIncidentReportFields(
     );
   }
 
+  if (
+    input.note !== undefined &&
+    input.note !== null &&
+    typeof input.note !== "string"
+  ) {
+    return invalid("Report note must be text.");
+  }
+
+  const note = normalizeReportNote(
+    typeof input.note === "string" ? input.note : ""
+  );
+
+  if (note && note.length > INCIDENT_REPORT_NOTE_LIMIT) {
+    return invalid(
+      `Report note must be ${INCIDENT_REPORT_NOTE_LIMIT} characters or fewer.`
+    );
+  }
+
   return {
     status: "valid",
     value: {
       raceNumber,
       lapNumber,
       turnNumber,
-      carNumber
+      carNumber,
+      note: note || null
     }
   };
 }
@@ -199,4 +222,8 @@ function invalid(message: string): IncidentReportValidationResult {
     status: "invalid",
     message
   };
+}
+
+function normalizeReportNote(value: string): string {
+  return value.replace(/`/g, "'").replace(/\s+/g, " ").trim();
 }

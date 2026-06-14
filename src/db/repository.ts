@@ -38,6 +38,7 @@ export interface IncidentReport {
   readonly lapNumber: number;
   readonly turnNumber: number;
   readonly carNumber: string;
+  readonly note: string | null;
   readonly createdAt: number;
 }
 
@@ -96,18 +97,18 @@ export interface CompleteStewardingSessionInput {
   readonly completedByUserId: string;
 }
 
-export interface ReopenAwaitingStewardsSessionForReportingInput {
+export interface ReopenStewardingSessionForReportingInput {
   readonly guildId: string;
   readonly reopenedByUserId: string;
 }
 
-export type ReopenAwaitingStewardsSessionForReportingResult =
+export type ReopenStewardingSessionForReportingResult =
   | {
       readonly status: "reopened";
       readonly session: IncidentSession;
     }
   | {
-      readonly status: "no_awaiting_stewards" | "stewarding_started";
+      readonly status: "no_stewarding_session" | "penalties_exist";
       readonly session?: IncidentSession | undefined;
     };
 
@@ -135,6 +136,7 @@ export interface InsertReportInput {
   readonly lapNumber: number;
   readonly turnNumber: number;
   readonly carNumber: string;
+  readonly note?: string | null;
 }
 
 export interface DuplicateReportInput {
@@ -241,9 +243,9 @@ export interface IncidentRepository {
   completeStewardingSession(
     input: CompleteStewardingSessionInput
   ): Promise<IncidentSession | null>;
-  reopenAwaitingStewardsSessionForReporting(
-    input: ReopenAwaitingStewardsSessionForReportingInput
-  ): Promise<ReopenAwaitingStewardsSessionForReportingResult>;
+  reopenStewardingSessionForReporting(
+    input: ReopenStewardingSessionForReportingInput
+  ): Promise<ReopenStewardingSessionForReportingResult>;
   reopenDecidedSessionForStewarding(
     input: ReopenDecidedSessionForStewardingInput
   ): Promise<ReopenDecidedSessionForStewardingResult>;
