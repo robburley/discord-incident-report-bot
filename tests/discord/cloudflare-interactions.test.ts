@@ -63,6 +63,60 @@ describe("Cloudflare interaction entrypoint", () => {
     });
   });
 
+  it("returns 401 when the signed timestamp is stale", async () => {
+    const fixture = createSigningFixture();
+    const body = JSON.stringify({ type: 1 });
+
+    const response = await worker.fetch(
+      new Request("https://example.com/", {
+        method: "POST",
+        body,
+        headers: fixture.signBody(body, timestampSecondsFromNow(-301))
+      }),
+      { DISCORD_PUBLIC_KEY: fixture.publicKeyHex }
+    );
+
+    await expectJsonResponse(response, 401, {
+      error: "Invalid request signature."
+    });
+  });
+
+  it("returns 401 when the signed timestamp is too far in the future", async () => {
+    const fixture = createSigningFixture();
+    const body = JSON.stringify({ type: 1 });
+
+    const response = await worker.fetch(
+      new Request("https://example.com/", {
+        method: "POST",
+        body,
+        headers: fixture.signBody(body, timestampSecondsFromNow(301))
+      }),
+      { DISCORD_PUBLIC_KEY: fixture.publicKeyHex }
+    );
+
+    await expectJsonResponse(response, 401, {
+      error: "Invalid request signature."
+    });
+  });
+
+  it("returns 401 when the signed timestamp is malformed", async () => {
+    const fixture = createSigningFixture();
+    const body = JSON.stringify({ type: 1 });
+
+    const response = await worker.fetch(
+      new Request("https://example.com/", {
+        method: "POST",
+        body,
+        headers: fixture.signBody(body, "not-a-timestamp")
+      }),
+      { DISCORD_PUBLIC_KEY: fixture.publicKeyHex }
+    );
+
+    await expectJsonResponse(response, 401, {
+      error: "Invalid request signature."
+    });
+  });
+
   it("does not log raw bodies or signature header values", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const fixture = createSigningFixture();
@@ -114,7 +168,7 @@ function createSigningFixture(): SigningFixture {
 
   return {
     publicKeyHex,
-    signBody(body: string, timestamp = "1700000000"): Headers {
+    signBody(body: string, timestamp = timestampSecondsFromNow(0)): Headers {
       const message = Buffer.concat([
         Buffer.from(timestamp, "utf8"),
         Buffer.from(body, "utf8")
@@ -127,6 +181,10 @@ function createSigningFixture(): SigningFixture {
       });
     }
   };
+}
+
+function timestampSecondsFromNow(deltaSeconds: number): string {
+  return Math.floor(Date.now() / 1_000 + deltaSeconds).toString();
 }
 
 async function expectJsonResponse(

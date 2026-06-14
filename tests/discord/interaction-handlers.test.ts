@@ -33,6 +33,8 @@ import type {
   IncidentSession,
   InsertReportInput,
   InsertReportResult,
+  InsertProcessedDiscordInteractionInput,
+  InsertProcessedDiscordInteractionResult,
   Penalty,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
@@ -45,6 +47,8 @@ import type {
   UpsertPenaltyResult,
   UpsertGuildConfigInput
 } from "../../src/db/repository";
+
+let interactionIdNumber = 1;
 
 describe("Discord interaction handlers", () => {
   let repository: MemoryIncidentRepository;
@@ -417,6 +421,32 @@ describe("Discord interaction handlers", () => {
     ]);
   });
 
+  it("does not process duplicate state-changing session interactions twice", async () => {
+    await seedConfig(repository);
+    const interaction = sessionInteraction("start");
+
+    const first = await handleDiscordInteraction(interaction, {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+    const duplicate = await handleDiscordInteraction(interaction, {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+    await flushWaitUntil();
+
+    expect(first.body).toMatchObject({
+      data: { content: "Incident session started." }
+    });
+    expect(duplicate.body).toMatchObject({
+      data: { content: "This interaction was already processed." }
+    });
+    expect(repository.sessions).toHaveLength(1);
+    expect(restClient.messages).toHaveLength(1);
+  });
+
   it("allows server admins without the manager role to start a session", async () => {
     await seedConfig(repository);
 
@@ -505,6 +535,12 @@ describe("Discord interaction handlers", () => {
     expect(restClient.messages).toEqual([
       {
         channelId: "channel-1",
+        allowedMentions: {
+          parse: [],
+          users: ["user-1"],
+          roles: [],
+          repliedUser: false
+        },
         content: [
           "An incident report has been submitted by <@user-1>.",
           "Details:",
@@ -551,6 +587,12 @@ describe("Discord interaction handlers", () => {
     expect(restClient.messages).toEqual([
       {
         channelId: "channel-1",
+        allowedMentions: {
+          parse: [],
+          users: ["user-1"],
+          roles: [],
+          repliedUser: false
+        },
         content: [
           "An incident report has been submitted by <@user-1>.",
           "Details:",
@@ -607,6 +649,12 @@ describe("Discord interaction handlers", () => {
     expect(restClient.messages).toEqual([
       {
         channelId: "channel-1",
+        allowedMentions: {
+          parse: [],
+          users: ["user-1"],
+          roles: [],
+          repliedUser: false
+        },
         content:
           "Incident reporting ended for <#channel-1>.\n\n`Race  Lap  Turn  Car  ID                    User`\n`1     2    3     07   report-interaction-1` <@user-1>"
       },
@@ -624,6 +672,33 @@ describe("Discord interaction handlers", () => {
           "Reporting closed, incident summary posted, and stewarding started."
       }
     ]);
+  });
+
+  it("does not schedule duplicate deferred state-changing interactions", async () => {
+    await seedConfig(repository);
+    const session = await seedReportingSession(repository);
+    await repository.insertReport(reportInput(session, "report-interaction-1"));
+    const interaction = sessionInteraction("steward");
+
+    const first = await handleDiscordInteraction(interaction, {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+    const duplicate = await handleDiscordInteraction(interaction, {
+      repository,
+      restClient,
+      waitUntil: captureWaitUntil
+    });
+    await flushWaitUntil();
+
+    expect(first.body).toMatchObject({ type: 5 });
+    expect(duplicate.body).toMatchObject({
+      data: { content: "This interaction was already processed." }
+    });
+    expect(repository.sessions[0]).toMatchObject({ status: "stewarding" });
+    expect(restClient.messages).toHaveLength(2);
+    expect(restClient.edits).toHaveLength(1);
   });
 
   it("defers /incident-session summary and reposts the latest incident report summary", async () => {
@@ -944,6 +1019,12 @@ describe("Discord interaction handlers", () => {
     expect(restClient.messages).toEqual([
       {
         channelId: "channel-1",
+        allowedMentions: {
+          parse: [],
+          users: ["driver-1"],
+          roles: [],
+          repliedUser: false
+        },
         content: expected
       }
     ]);
@@ -1522,9 +1603,11 @@ function baseCommand(
     readonly channelId?: string;
     readonly userId?: string;
     readonly roles?: readonly string[];
+    readonly interactionId?: string;
   } = {}
 ) {
   return {
+    id: input.interactionId ?? `interaction-${interactionIdNumber++}`,
     type: 2,
     guild_id: input.guildId ?? "guild-1",
     channel_id: input.channelId ?? "channel-1",
@@ -1606,6 +1689,7 @@ function sessionInteraction(
     readonly roles?: readonly string[];
     readonly permissions?: string;
     readonly options?: readonly { readonly name: string; readonly value: unknown }[];
+    readonly interactionId?: string;
   } = {}
 ) {
   return {
@@ -1886,6 +1970,7 @@ class MemoryIncidentRepository implements IncidentRepository {
   readonly reports: IncidentReport[] = [];
   readonly penaltyPresets: PenaltyPreset[] = [];
   readonly penalties: Penalty[] = [];
+  readonly processedInteractions = new Set<string>();
   private now = 1_000;
   private idNumber = 1;
 
@@ -2007,6 +2092,17 @@ class MemoryIncidentRepository implements IncidentRepository {
         (report) => report.discordInteractionId === discordInteractionId
       ) ?? null
     );
+  }
+
+  async insertProcessedDiscordInteraction(
+    input: InsertProcessedDiscordInteractionInput
+  ): Promise<InsertProcessedDiscordInteractionResult> {
+    if (this.processedInteractions.has(input.interactionId)) {
+      return { status: "duplicate" };
+    }
+
+    this.processedInteractions.add(input.interactionId);
+    return { status: "inserted" };
   }
 
   async findDuplicateReportForUser(

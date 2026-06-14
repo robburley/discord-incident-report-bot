@@ -154,3 +154,20 @@ export const penalties = sqliteTable(
     )
   })
 );
+
+export const processedDiscordInteractions = sqliteTable(
+  "processed_discord_interactions",
+  {
+    interactionId: text("interaction_id").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    commandName: text("command_name").notNull(),
+    subcommandName: text("subcommand_name").notNull(),
+    createdAt: integer("created_at").notNull()
+  },
+  (table) => ({
+    guildLookup: index("processed_discord_interactions_guild_lookup_idx").on(
+      table.guildId,
+      table.createdAt
+    )
+  })
+);

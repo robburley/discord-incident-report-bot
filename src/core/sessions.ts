@@ -5,6 +5,7 @@ import type {
   PenaltyPreset,
   UpsertPenaltyResult
 } from "../db/repository";
+import { escapeDiscordMentions } from "../discord/mentions";
 import { hasIncidentManagerPermission } from "./authorization";
 import { INCIDENT_SETUP_MESSAGE } from "./config";
 import {
@@ -924,5 +925,8 @@ async function authorizeSessionAction(
 }
 
 function normalizePenaltyText(value: string): string {
-  return value.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+  return escapeDiscordMentions(value)
+    .replace(/`/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }

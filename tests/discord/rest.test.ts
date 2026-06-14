@@ -94,7 +94,13 @@ describe("FetchDiscordRestClient", () => {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          content: "Guide chunk"
+          content: "Guide chunk",
+          allowed_mentions: {
+            parse: [],
+            users: [],
+            roles: [],
+            replied_user: false
+          }
         })
       }
     );
@@ -111,5 +117,68 @@ describe("FetchDiscordRestClient", () => {
     await expect(
       client.createDmChannel({ recipientId: "user-1" })
     ).rejects.toThrow("Discord REST DM channel creation failed with 403");
+  });
+
+  it("sanitizes upstream Discord error bodies before throwing", async () => {
+    const token = "aaaaaaaaaaaaaaaaaaaa.bbbbbb.cccccccccccccccccccc";
+    const oversizedBody = [
+      `authorization: Bot ${token}`,
+      `trace token ${token}`,
+      "original-message-content",
+      "x".repeat(500)
+    ].join("\n");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(oversizedBody, { status: 429 }))
+    );
+
+    const client = new FetchDiscordRestClient("bot-token");
+
+    let thrown: unknown;
+    try {
+      await client.createChannelMessage({
+        channelId: "channel-1",
+        content: "original-message-content"
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    const message = thrown instanceof Error ? thrown.message : "";
+
+    expect(message).toContain("Discord REST message post failed with 429");
+    expect(message).toContain("Bot [redacted]");
+    expect(message).toContain("[redacted-token]");
+    expect(message).not.toContain(token);
+    expect(message).not.toContain("original-message-content");
+    expect(message).not.toContain("\n");
+    expect(message.length).toBeLessThanOrEqual(
+      "Discord REST message post failed with 429: ".length + 300
+    );
+  });
+
+  it("sanitizes interaction response edit failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          "webhook token zzzzzzzzzzzzzzzzzzzz.yyyyyy.xxxxxxxxxxxxxxxxxxxx",
+          { status: 401 }
+        )
+      )
+    );
+
+    const client = new FetchDiscordRestClient("bot-token");
+
+    await expect(
+      client.editOriginalInteractionResponse({
+        applicationId: "app-1",
+        interactionToken: "interaction-token-that-must-not-log",
+        content: "edit-content-that-must-not-log"
+      })
+    ).rejects.toThrow(
+      "Discord REST interaction response edit failed with 401: webhook token [redacted-token]"
+    );
   });
 });

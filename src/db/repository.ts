@@ -178,6 +178,13 @@ export interface ClearPenaltiesForIncidentInput {
   readonly incidentReportId: string;
 }
 
+export interface InsertProcessedDiscordInteractionInput {
+  readonly interactionId: string;
+  readonly guildId: string;
+  readonly commandName: string;
+  readonly subcommandName: string;
+}
+
 export type InsertReportResult =
   | {
       readonly status: "inserted";
@@ -196,6 +203,14 @@ export type UpsertPenaltyResult =
   | {
       readonly status: "updated";
       readonly penalty: Penalty;
+    };
+
+export type InsertProcessedDiscordInteractionResult =
+  | {
+      readonly status: "inserted";
+    }
+  | {
+      readonly status: "duplicate";
     };
 
 export interface PenaltyDecisionSummaryRow {
@@ -282,4 +297,7 @@ export interface IncidentRepository {
     guildId: string,
     discordInteractionId: string
   ): Promise<IncidentReport | null>;
+  insertProcessedDiscordInteraction(
+    input: InsertProcessedDiscordInteractionInput
+  ): Promise<InsertProcessedDiscordInteractionResult>;
 }

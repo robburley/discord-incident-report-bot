@@ -46,6 +46,8 @@ import type {
   IncidentSession,
   InsertReportInput,
   InsertReportResult,
+  InsertProcessedDiscordInteractionInput,
+  InsertProcessedDiscordInteractionResult,
   Penalty,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
@@ -346,6 +348,25 @@ describe("core business logic", () => {
         turnNumber: 3,
         carNumber: "07",
         note: null
+      }
+    });
+
+    expect(
+      validateIncidentReportFields({
+        raceNumber: "1",
+        lapNumber: "2",
+        turnNumber: "3",
+        carNumber: "07",
+        note: "please review @everyone <@1234567890> <@&9876543210>"
+      })
+    ).toEqual({
+      status: "valid",
+      value: {
+        raceNumber: 1,
+        lapNumber: 2,
+        turnNumber: 3,
+        carNumber: "07",
+        note: "please review @\u200beveryone <@\u200b1234567890> <@\u200b&9876543210>"
       }
     });
 
@@ -1307,7 +1328,7 @@ describe("core business logic", () => {
       userId: "manager-1",
       memberRoleIds: ["manager-role"],
       name: "Unsafe",
-      outcome: "Unsafe `rejoin`\nplus warning",
+      outcome: "Unsafe `rejoin`\nplus warning @here <@1234567890>",
       delta: 1
     });
     await applyPenalty({
@@ -1346,7 +1367,7 @@ describe("core business logic", () => {
     expect(decisionSummary.status).toBe("found");
     expect(
       decisionSummary.status === "found" ? decisionSummary.summaryMessages[0] : ""
-    ).toContain("Unsafe 'rejoin' plus warning");
+    ).toContain("Unsafe 'rejoin' plus warning @\u200bhere <@\u200b1234567890>");
     expect(
       decisionSummary.status === "found" ? decisionSummary.summaryMessages[0] : ""
     ).toContain("<@driver-1>");
@@ -1439,6 +1460,7 @@ class MemoryIncidentRepository implements IncidentRepository {
   readonly reports: IncidentReport[] = [];
   readonly penaltyPresets: PenaltyPreset[] = [];
   readonly penalties: Penalty[] = [];
+  readonly processedInteractions = new Set<string>();
   private now = 1_000;
   private idNumber = 1;
 
@@ -1560,6 +1582,17 @@ class MemoryIncidentRepository implements IncidentRepository {
         (report) => report.discordInteractionId === discordInteractionId
       ) ?? null
     );
+  }
+
+  async insertProcessedDiscordInteraction(
+    input: InsertProcessedDiscordInteractionInput
+  ): Promise<InsertProcessedDiscordInteractionResult> {
+    if (this.processedInteractions.has(input.interactionId)) {
+      return { status: "duplicate" };
+    }
+
+    this.processedInteractions.add(input.interactionId);
+    return { status: "inserted" };
   }
 
   async findDuplicateReportForUser(

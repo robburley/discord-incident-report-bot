@@ -126,6 +126,17 @@ ON penalties (incident_session_id, incident_report_id);
 
 CREATE UNIQUE INDEX penalties_session_report_affected_user_unique
 ON penalties (incident_session_id, incident_report_id, affected_user_id);
+
+CREATE TABLE processed_discord_interactions (
+  interaction_id text PRIMARY KEY NOT NULL,
+  guild_id text NOT NULL,
+  command_name text NOT NULL,
+  subcommand_name text NOT NULL,
+  created_at integer NOT NULL
+);
+
+CREATE INDEX processed_discord_interactions_guild_lookup_idx
+ON processed_discord_interactions (guild_id, created_at);
 `;
 
 describe("DrizzleIncidentRepository", () => {
@@ -685,6 +696,31 @@ describe("DrizzleIncidentRepository", () => {
       status: "duplicate_interaction",
       report: first.report
     });
+  });
+
+  it("makes duplicate processed Discord interaction IDs idempotent", async () => {
+    const first = await repository.insertProcessedDiscordInteraction({
+      interactionId: "interaction-1",
+      guildId: "guild-1",
+      commandName: "incident-session",
+      subcommandName: "start"
+    });
+    const duplicate = await repository.insertProcessedDiscordInteraction({
+      interactionId: "interaction-1",
+      guildId: "guild-1",
+      commandName: "incident-session",
+      subcommandName: "start"
+    });
+    const second = await repository.insertProcessedDiscordInteraction({
+      interactionId: "interaction-2",
+      guildId: "guild-1",
+      commandName: "incident-session",
+      subcommandName: "start"
+    });
+
+    expect(first.status).toBe("inserted");
+    expect(duplicate.status).toBe("duplicate");
+    expect(second.status).toBe("inserted");
   });
 
   it("finds exact duplicate reports from the same user in the same session", async () => {

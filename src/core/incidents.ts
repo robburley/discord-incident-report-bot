@@ -2,6 +2,7 @@ import type {
   IncidentReport,
   IncidentRepository
 } from "../db/repository";
+import { escapeDiscordMentions } from "../discord/mentions";
 import { INCIDENT_SETUP_MESSAGE } from "./config";
 
 const CAR_NUMBER_PATTERN = /^[A-Za-z0-9_-]{1,12}$/;
@@ -225,5 +226,8 @@ function invalid(message: string): IncidentReportValidationResult {
 }
 
 function normalizeReportNote(value: string): string {
-  return value.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+  return escapeDiscordMentions(value)
+    .replace(/`/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }

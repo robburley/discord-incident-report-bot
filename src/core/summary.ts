@@ -3,6 +3,7 @@ import type {
   IncidentSession,
   PenaltyDecisionSummaryRow
 } from "../db/repository";
+import { escapeDiscordMentions } from "../discord/mentions";
 
 export const DISCORD_MESSAGE_LIMIT = 2_000;
 
@@ -181,5 +182,8 @@ function formatDecisionTable(
 }
 
 function normalizeDiscordTableCell(value: string): string {
-  return value.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+  return escapeDiscordMentions(value)
+    .replace(/`/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }

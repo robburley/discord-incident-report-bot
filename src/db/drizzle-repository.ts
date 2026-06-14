@@ -6,7 +6,8 @@ import {
   incidentReports,
   incidentSessions,
   penalties,
-  penaltyPresets
+  penaltyPresets,
+  processedDiscordInteractions
 } from "./schema";
 import type {
   ClearPenaltiesForIncidentInput,
@@ -22,6 +23,8 @@ import type {
   IncidentSession,
   InsertReportInput,
   InsertReportResult,
+  InsertProcessedDiscordInteractionInput,
+  InsertProcessedDiscordInteractionResult,
   PenaltyDecisionSummaryRow,
   PenaltyPreset,
   ReopenDecidedSessionForStewardingInput,
@@ -725,6 +728,30 @@ export class DrizzleIncidentRepository implements IncidentRepository {
     return (row as IncidentReport | undefined) ?? null;
   }
 
+  async insertProcessedDiscordInteraction(
+    input: InsertProcessedDiscordInteractionInput
+  ): Promise<InsertProcessedDiscordInteractionResult> {
+    try {
+      await this.db
+        .insert(processedDiscordInteractions)
+        .values({
+          interactionId: input.interactionId,
+          guildId: input.guildId,
+          commandName: input.commandName,
+          subcommandName: input.subcommandName,
+          createdAt: this.now()
+        });
+
+      return { status: "inserted" };
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        return { status: "duplicate" };
+      }
+
+      throw error;
+    }
+  }
+
   private async getLatestSessionForGuild(
     guildId: string
   ): Promise<IncidentSession | null> {
@@ -750,7 +777,8 @@ const schema = {
   incidentSessions,
   incidentReports,
   penaltyPresets,
-  penalties
+  penalties,
+  processedDiscordInteractions
 };
 
 function requireRow<T>(row: unknown, message: string): T {

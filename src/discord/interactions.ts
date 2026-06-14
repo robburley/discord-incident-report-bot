@@ -39,7 +39,7 @@ import {
   TURN_NUMBER_INPUT_ID,
   incidentReportModalResponse
 } from "./modals";
-import type { DiscordRestClient } from "./rest";
+import type { DiscordAllowedMentions, DiscordRestClient } from "./rest";
 import {
   autocompleteDiscordResponse,
   deferredEphemeralDiscordMessage,
@@ -57,6 +57,22 @@ const INCIDENT_CONFIG_AUTHORIZATION_MESSAGE =
   "You need Discord Manage Server permission or the configured incident manager role to use this command.";
 const INCIDENT_CONFIG_HELP_DM_FAILURE_MESSAGE =
   "I could not DM you the steward guide. Check your Discord privacy settings and try again.";
+const DUPLICATE_INTERACTION_MESSAGE =
+  "This interaction was already processed.";
+const STATE_CHANGING_CONFIG_SUBCOMMANDS = new Set([
+  "role",
+  "penalty-add",
+  "penalty-remove"
+]);
+const STATE_CHANGING_SESSION_SUBCOMMANDS = new Set([
+  "start",
+  "steward",
+  "penalty",
+  "penalty-clear",
+  "complete",
+  "reopen-reporting",
+  "reopen-stewarding"
+]);
 
 export interface InteractionHandlerDependencies {
   readonly repository?: IncidentRepository;
@@ -254,6 +270,19 @@ async function handleConfigCommand(
 
   const subcommand = getSubcommand(interaction.data);
 
+  const idempotency = await ensureStateChangingInteractionNotProcessed({
+    repository,
+    interaction,
+    context,
+    commandName: INCIDENT_CONFIG_COMMAND_NAME,
+    subcommandName: typeof subcommand?.name === "string" ? subcommand.name : null,
+    stateChangingSubcommands: STATE_CHANGING_CONFIG_SUBCOMMANDS
+  });
+
+  if (idempotency) {
+    return idempotency;
+  }
+
   if (subcommand?.name === "help") {
     return handleConfigHelpCommand(repository, context, dependencies);
   }
@@ -426,6 +455,19 @@ async function handleSessionCommand(
 
   const subcommand = getSubcommand(interaction.data);
 
+  const idempotency = await ensureStateChangingInteractionNotProcessed({
+    repository,
+    interaction,
+    context,
+    commandName: INCIDENT_SESSION_COMMAND_NAME,
+    subcommandName: typeof subcommand?.name === "string" ? subcommand.name : null,
+    stateChangingSubcommands: STATE_CHANGING_SESSION_SUBCOMMANDS
+  });
+
+  if (idempotency) {
+    return idempotency;
+  }
+
   if (subcommand?.name === "start") {
     const result = await startIncidentSession({
       repository,
@@ -574,7 +616,12 @@ async function handleSessionCommand(
         outcome: result.outcome,
         note: result.note
       });
-      scheduleChannelPosts(dependencies, result.session.channelId, [content]);
+      scheduleChannelPosts(dependencies, result.session.channelId, [
+        {
+          content,
+          allowedMentions: allowedUserMentions(result.affectedUserId)
+        }
+      ]);
 
       return ok(ephemeralDiscordMessage(content));
     }
@@ -837,7 +884,8 @@ async function handleModalSubmit(
     try {
       await dependencies.restClient?.createChannelMessage({
         channelId: context.channelId,
-        content: incidentReportSubmittedMessage(context.userId, result.report)
+        content: incidentReportSubmittedMessage(context.userId, result.report),
+        allowedMentions: allowedUserMentions(context.userId)
       });
     } catch (error) {
       console.error({
@@ -951,6 +999,39 @@ function getFocusedOption(
   option: DiscordCommandOption | null
 ): DiscordCommandOption | null {
   return option?.options?.find((child) => child.focused === true) ?? null;
+}
+
+async function ensureStateChangingInteractionNotProcessed(input: {
+  readonly repository: IncidentRepository;
+  readonly interaction: DiscordInteractionPayload;
+  readonly context: GuildCommandContext;
+  readonly commandName: string;
+  readonly subcommandName: string | null;
+  readonly stateChangingSubcommands: ReadonlySet<string>;
+}): Promise<InteractionHandlerResult | null> {
+  if (
+    !input.subcommandName ||
+    !input.stateChangingSubcommands.has(input.subcommandName)
+  ) {
+    return null;
+  }
+
+  if (typeof input.interaction.id !== "string" || input.interaction.id === "") {
+    return ok(ephemeralDiscordMessage("Malformed Discord interaction ID."));
+  }
+
+  const result = await input.repository.insertProcessedDiscordInteraction({
+    interactionId: input.interaction.id,
+    guildId: input.context.guildId,
+    commandName: input.commandName,
+    subcommandName: input.subcommandName
+  });
+
+  if (result.status === "duplicate") {
+    return ok(ephemeralDiscordMessage(DUPLICATE_INTERACTION_MESSAGE));
+  }
+
+  return null;
 }
 
 function penaltyMessage(
@@ -1167,7 +1248,7 @@ function getDeferredInteractionContext(
 function scheduleChannelPosts(
   dependencies: InteractionHandlerDependencies,
   channelId: string,
-  messages: readonly string[]
+  messages: readonly ChannelPostInput[]
 ): void {
   const promise = postSummaryMessages(dependencies, channelId, messages);
   schedulePromise(dependencies, promise);
@@ -1183,7 +1264,7 @@ function scheduleSummaryAction(
 async function postSummaryMessages(
   dependencies: InteractionHandlerDependencies,
   channelId: string,
-  messages: readonly string[]
+  messages: readonly ChannelPostInput[]
 ): Promise<boolean> {
   if (!dependencies.restClient) {
     console.error({
@@ -1195,9 +1276,14 @@ async function postSummaryMessages(
 
   let allPosted = true;
 
-  for (const content of messages) {
+  for (const message of messages) {
     try {
-      await dependencies.restClient.createChannelMessage({ channelId, content });
+      const allowedMentions = getChannelPostAllowedMentions(message);
+      await dependencies.restClient.createChannelMessage({
+        channelId,
+        content: getChannelPostContent(message),
+        ...(allowedMentions ? { allowedMentions } : {})
+      });
     } catch (error) {
       allPosted = false;
       console.error({
@@ -1257,6 +1343,41 @@ export async function sendDiscordDirectMessages(
   }
 
   return true;
+}
+
+interface ChannelPostMessage {
+  readonly content: string;
+  readonly allowedMentions?: DiscordAllowedMentions;
+}
+
+type ChannelPostInput = string | ChannelPostMessage;
+
+function getChannelPostContent(message: ChannelPostInput): string {
+  return typeof message === "string" ? message : message.content;
+}
+
+function getChannelPostAllowedMentions(
+  message: ChannelPostInput
+): DiscordAllowedMentions | undefined {
+  if (typeof message !== "string") {
+    return message.allowedMentions;
+  }
+
+  const userIds = getUserMentionIds(message);
+  return userIds.length > 0 ? allowedUserMentions(...userIds) : undefined;
+}
+
+function allowedUserMentions(...userIds: readonly string[]): DiscordAllowedMentions {
+  return {
+    parse: [],
+    users: [...new Set(userIds.filter((userId) => userId !== ""))],
+    roles: [],
+    repliedUser: false
+  };
+}
+
+function getUserMentionIds(content: string): string[] {
+  return [...content.matchAll(/<@!?([^>]+)>/g)].map((match) => match[1] ?? "");
 }
 
 async function editDeferredResponse(
